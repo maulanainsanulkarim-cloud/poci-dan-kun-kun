@@ -1,0 +1,6 @@
+{
+  "name": "Indis Studio 2D",
+  "description": "Studio produksi animasi 2D vertikal 9:16 untuk seri Arsip Kelam Kelurahan Indis dengan rig kinematika balik (IK), lip-sync 6 viseme, dubbing audio, dan pengarah adegan AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
