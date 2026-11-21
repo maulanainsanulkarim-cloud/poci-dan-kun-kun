@@ -375,6 +375,23 @@ export const CharacterScenePanel: React.FC<CharacterScenePanelProps> = ({
             </label>
           </div>
 
+          {/* Official Puppet Rigging Sheet Reference Preview */}
+          {selectedChar.referenceSheetUrl && (
+            <div className="space-y-1.5 pt-1">
+              <span className="block text-[11px] font-medium text-zinc-400">
+                Referensi Puppet Sheet Aktif
+              </span>
+              <div className="rounded-lg overflow-hidden border border-zinc-800 bg-zinc-900">
+                <img
+                  src={selectedChar.referenceSheetUrl}
+                  alt={`Referensi puppet ${selectedChar.name}`}
+                  className="w-full h-36 object-contain bg-white"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Custom Character Reference Image */}
           <div className="flex items-center justify-between pt-1">
             <label className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-xs text-zinc-200 cursor-pointer flex items-center gap-1.5">

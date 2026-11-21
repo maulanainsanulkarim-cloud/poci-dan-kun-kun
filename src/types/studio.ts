@@ -32,6 +32,7 @@ export interface CharacterProfile {
   hasRedFolder?: boolean;
   hasCoinBag?: boolean;
   hasGavel?: boolean;
+  referenceSheetUrl?: string;
   referenceImageUrl?: string;
 }
 
