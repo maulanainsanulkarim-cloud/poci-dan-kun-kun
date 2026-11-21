@@ -1,3 +1,4 @@
+import { resolveSpeakerToCharacterId } from './characters';
 import {
   BackgroundPresetId,
   CharacterActionCue,
@@ -10,7 +11,7 @@ import {
   WeatherType,
 } from '../types/studio';
 
-function autoHighlightWords(text: string): string[] {
+export function autoHighlightWords(text: string): string[] {
   const keywords = [
     'tiga miliar',
     'lima miliar',
@@ -101,7 +102,7 @@ function autoHighlightWords(text: string): string[] {
   return found.slice(0, 3);
 }
 
-function inferActionCue(speaker: string, text: string): CharacterActionCue {
+export function inferActionCue(speaker: string, text: string): CharacterActionCue {
   const s = speaker.toUpperCase();
   const t = text.toLowerCase();
   if (t.includes('hihihi') || t.includes('tertawa')) return 'laugh';
@@ -117,6 +118,45 @@ function inferActionCue(speaker: string, text: string): CharacterActionCue {
   if (s.includes('KUN')) return 'sip_coffee';
   if (s.includes('TUYUL')) return 'sneak';
   return 'point';
+}
+
+export function redistributeDialoguesByTextLength(
+  dialogues: DialogueLine[],
+  startOffset = 0.4,
+  maxEnd = 14.6
+): DialogueLine[] {
+  if (dialogues.length === 0) return [];
+  const totalAvailable = Math.max(2, maxEnd - startOffset);
+  const gap = 0.32;
+  const totalGaps = Math.max(0, dialogues.length - 1) * gap;
+  const usable = Math.max(1, totalAvailable - totalGaps);
+  const weights = dialogues.map((d) => Math.max(10, d.text.length));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  let cursor = startOffset;
+  return dialogues.map((d, idx) => {
+    const dur = (weights[idx] / totalWeight) * usable;
+    const startSec = Number(cursor.toFixed(2));
+    const endSec = Number(Math.min(14.9, cursor + dur).toFixed(2));
+    cursor = endSec + gap;
+    return {
+      ...d,
+      startSec,
+      endSec: Math.max(startSec + 0.3, endSec),
+    };
+  });
+}
+
+export function ensureSpeakersInCast(scene: SceneConfig): SceneConfig {
+  const nextCast = [...scene.cast];
+  for (const line of scene.dialogues) {
+    const cid = resolveSpeakerToCharacterId(line.speaker);
+    if (cid && !nextCast.includes(cid) && nextCast.length < 4) {
+      nextCast.push(cid);
+    }
+  }
+  if (nextCast.length === scene.cast.length) return scene;
+  return { ...scene, cast: nextCast };
 }
 
 function parseDialogueBlock(rawBlock: string, sceneIndex: number): DialogueLine[] {

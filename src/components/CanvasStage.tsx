@@ -97,8 +97,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
     return () => cancelAnimationFrame(rafId);
   }, [isPlaying, isExporting]);
 
-  // Trigger SFX when crossing scene transitions or popups during playback
+  // Trigger SFX when crossing scene transitions, dialogue cues, or popups during playback
   const lastSfxKeyRef = useRef<string>('');
+  const lastLineSfxIdRef = useRef<string>('');
   useEffect(() => {
     if (!isPlaying || sfxMuted) return;
     const sceneTime = currentTime - activeSceneIdx * 15;
@@ -109,6 +110,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
         studioAudio.triggerSfx('whoosh');
       }
     }
+
+    const activeLine = activeScene.dialogues.find(
+      (d) => sceneTime >= d.startSec && sceneTime <= d.endSec
+    );
+    if (activeLine && lastLineSfxIdRef.current !== activeLine.id) {
+      lastLineSfxIdRef.current = activeLine.id;
+      const lower = activeLine.text.toLowerCase();
+      if (activeLine.actionCue === 'hop') studioAudio.triggerSfx('boing');
+      else if (activeLine.actionCue === 'laugh') studioAudio.triggerSfx('giggle');
+      else if (activeLine.actionCue === 'gavel_slam') studioAudio.triggerSfx('gavel');
+      else if (lower.includes('cekrek') || lower.includes('foto')) studioAudio.triggerSfx('camera');
+      else if (lower.includes('saldo') || lower.includes('koin') || lower.includes('miliar'))
+        studioAudio.triggerSfx('coin');
+      else if (lower.includes('error') || lower.includes('down')) studioAudio.triggerSfx('error');
+    }
+
     const popupStart = activeScene.popup.startSec ?? 1.8;
     if (Math.abs(sceneTime - popupStart) < 0.08) {
       const key = `pop_${activeSceneIdx}`;
@@ -190,12 +207,13 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
       const endSec = startSec + totalSec;
 
       recorder.start(250);
-      const startPerf = performance.now();
+      const startAudioClock = studioAudio.getAudioTime();
       let lastScheduledScene = -1;
       let lastPopupKey = '';
+      let lastExpLineId = '';
 
       const renderLoop = () => {
-        const elapsed = (performance.now() - startPerf) / 1000;
+        const elapsed = Math.max(0, studioAudio.getAudioTime() - startAudioClock);
         const simTime = startSec + elapsed;
         if (simTime >= endSec) {
           if (recorder.state === 'recording') {
@@ -206,21 +224,40 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
         const scIdx = Math.min(3, Math.floor(simTime / 15)) as 0 | 1 | 2 | 3;
         const scTime = simTime - scIdx * 15;
+        const sc = episode.scenes[scIdx];
 
-        // Play dubbing buffer per scene boundary
+        // Play dubbing buffer per scene boundary honoring dubbingOffsetSec
         if (scIdx !== lastScheduledScene) {
           lastScheduledScene = scIdx;
           const slotBuf = audioSlots[scIdx]?.buffer;
+          const dubOffset = sc.dubbingOffsetSec ?? 0;
           if (slotBuf) {
-            studioAudio.playDubbingSlot(slotBuf, 0);
+            studioAudio.playDubbingSlot(slotBuf, scTime, dubOffset);
           } else {
             studioAudio.stopDubbing();
           }
           if (!sfxMuted) studioAudio.triggerSfx('whoosh');
         }
 
-        // Trigger scene popup / SFX cues cleanly during render
-        const sc = episode.scenes[scIdx];
+        // Trigger dialogue action SFX cleanly during export
+        const activeLine = sc.dialogues.find(
+          (d) => scTime >= d.startSec && scTime <= d.endSec
+        );
+        if (!sfxMuted && activeLine && lastExpLineId !== activeLine.id) {
+          lastExpLineId = activeLine.id;
+          const lower = activeLine.text.toLowerCase();
+          if (activeLine.actionCue === 'hop') studioAudio.triggerSfx('boing');
+          else if (activeLine.actionCue === 'laugh') studioAudio.triggerSfx('giggle');
+          else if (activeLine.actionCue === 'gavel_slam') studioAudio.triggerSfx('gavel');
+          else if (lower.includes('cekrek') || lower.includes('foto'))
+            studioAudio.triggerSfx('camera');
+          else if (lower.includes('saldo') || lower.includes('koin'))
+            studioAudio.triggerSfx('coin');
+          else if (lower.includes('error') || lower.includes('down'))
+            studioAudio.triggerSfx('error');
+        }
+
+        // Trigger scene popup SFX cues cleanly during render
         const popStart = sc.popup.startSec ?? 1.8;
         if (!sfxMuted && Math.abs(scTime - popStart) < 0.06 && lastPopupKey !== `exp_pop_${scIdx}`) {
           lastPopupKey = `exp_pop_${scIdx}`;

@@ -18,6 +18,11 @@ import {
   createCharacterSpringRig,
   evaluateCharacterMotion,
 } from './ikPhysics';
+import {
+  detectStoryPropsFromScript,
+  drawScriptStoryProps,
+  evaluateScriptChoreography,
+} from './scriptChoreographer';
 
 const rigPool = new Map<string, CharacterSpringRig>();
 
@@ -56,8 +61,10 @@ export function renderStudioFrame(
   const scene: SceneConfig = episode.scenes[sceneIndex];
   const slot = audioSlots[sceneIndex];
   const envelope = slot?.buffer ? slot.envelope30Fps : null;
+  const dubbingOffset = scene.dubbingOffsetSec ?? 0;
+  const audioSampleTime = Math.max(0, sceneTime - dubbingOffset);
 
-  // Determine active dialogue line
+  // Determine active dialogue line (already aligned to audio when MP3 is present)
   const activeDialogue: DialogueLine | null =
     scene.dialogues.find((d) => sceneTime >= d.startSec && sceneTime <= d.endSec) ?? null;
 
@@ -68,10 +75,26 @@ export function renderStudioFrame(
   // Cast positions across stage (1..4 characters)
   const castIds = scene.cast.length > 0 ? scene.cast.slice(0, 4) : ['poci', 'kunkun'];
   const stageAnchors = computeStageAnchors(castIds.length, W);
+  const speakerIdx = activeSpeakerId ? castIds.indexOf(activeSpeakerId) : -1;
+
+  // Script-driven Choreography (reads live edited visualDesc + dialogues!)
+  const choreographyMap = evaluateScriptChoreography(
+    scene,
+    castIds,
+    stageAnchors,
+    sceneTime,
+    activeDialogue,
+    activeSpeakerId,
+    speakerIdx
+  );
 
   // Speaker world X for cinematic camera pan/zoom
-  const speakerIdx = activeSpeakerId ? castIds.indexOf(activeSpeakerId) : -1;
-  const targetFocusX = speakerIdx >= 0 ? stageAnchors[speakerIdx].x : W / 2;
+  const speakerChoreo = activeSpeakerId ? choreographyMap.get(activeSpeakerId) : undefined;
+  const targetFocusX = speakerChoreo
+    ? speakerChoreo.x
+    : speakerIdx >= 0
+    ? stageAnchors[speakerIdx].x
+    : W / 2;
 
   // Camera transform (Zoom + Pan + Shock Shake)
   let camZoom = 1.0;
@@ -79,7 +102,10 @@ export function renderStudioFrame(
   let camOffsetY = 0;
 
   if (cameraAutoZoom && scene.cameraAction !== 'wide') {
-    if (scene.cameraAction === 'zoom_speaker' || (scene.cameraAction === 'auto' && speakerIdx >= 0)) {
+    if (
+      scene.cameraAction === 'zoom_speaker' ||
+      (scene.cameraAction === 'auto' && speakerIdx >= 0)
+    ) {
       camZoom = 1.09 + 0.03 * Math.sin(sceneTime * 0.8);
       camOffsetX = (W / 2 - targetFocusX) * 0.28;
       camOffsetY = -28;
@@ -133,7 +159,11 @@ export function renderStudioFrame(
     sceneTime
   );
 
-  // 2. Characters Layer
+  // 2. Script-matched Animated Story Props Layer
+  const storyProps = detectStoryPropsFromScript(scene);
+  drawScriptStoryProps(ctx, storyProps, W, GROUND_Y, sceneTime);
+
+  // 3. Characters Layer
   const windStrength =
     scene.weather === 'rain' || scene.lighting === 'storm'
       ? 1.4
@@ -146,36 +176,27 @@ export function renderStudioFrame(
     if (!profile) return;
 
     const rig = getSpringRig(cid);
-    const anchor = stageAnchors[idx];
+    const choreo = choreographyMap.get(cid) ?? {
+      ...stageAnchors[idx],
+      actionCue: 'idle' as const,
+      lookDir: 0,
+    };
     const isSpeaking = activeSpeakerId === cid;
-    const actionCue = isSpeaking
-      ? activeDialogue?.actionCue ?? 'point'
-      : cid === 'kunkun'
-      ? 'idle'
-      : cid === 'poci' && sceneIndex === 3 && sceneTime > 10
-      ? 'plank'
-      : 'idle';
 
-    // Look toward active speaker or toward camera (in Scene 4 finale or narrator lines)
-    let lookDir = 0;
-    if (speakerIdx >= 0 && speakerIdx !== idx) {
-      lookDir = stageAnchors[speakerIdx].x > anchor.x ? 0.85 : -0.85;
-    } else if (isSpeaking && castIds.length > 1) {
-      const otherIdx = idx === 0 ? 1 : 0;
-      lookDir = stageAnchors[otherIdx].x > anchor.x ? 0.35 : -0.35;
-    }
+    // Only sample envelope if audio is actually active (sceneTime >= dubbingOffset)
+    const activeEnvelope = sceneTime >= dubbingOffset ? envelope : null;
 
     const pose = evaluateCharacterMotion(
       rig,
       cid,
       profile.motionEnergy,
       clampedTime,
-      sceneTime,
+      audioSampleTime,
       isSpeaking,
-      actionCue,
-      envelope,
+      choreo.actionCue,
+      activeEnvelope,
       activeDialogue,
-      lookDir,
+      choreo.lookDir,
       windStrength,
       idx * 1.37 + 0.5
     );
@@ -184,20 +205,20 @@ export function renderStudioFrame(
       ctx,
       profile,
       pose,
-      anchor.x,
-      GROUND_Y + anchor.yOffset,
-      anchor.scale,
+      choreo.x,
+      GROUND_Y + choreo.yOffset,
+      choreo.scale,
       clampedTime
     );
   });
 
-  // 3. Atmospheric Weather & Lighting Grade
+  // 4. Atmospheric Weather & Lighting Grade
   drawWeatherParticles(ctx, W, H, GROUND_Y, scene.weather, clampedTime);
   drawLightingOverlay(ctx, W, H, scene.lighting, clampedTime);
 
   ctx.restore(); // Exit camera space for crisp UI overlays (Subtitles, Popups, Watermark)
 
-  // 4. Optional Series Watermark (Top Left)
+  // 5. Optional Series Watermark (Top Left)
   if (showWatermark && episode.watermarkText.trim()) {
     ctx.save();
     ctx.fillStyle = 'rgba(9, 9, 11, 0.58)';
@@ -216,20 +237,31 @@ export function renderStudioFrame(
     ctx.fillStyle = '#A1A1AA';
     ctx.font = '600 18px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
-    ctx.fillText(`EP ${String(episode.episodeNumber).padStart(2, '0')} · S${scene.sceneNumber}`, W - 54, 93);
+    ctx.fillText(
+      `EP ${String(episode.episodeNumber).padStart(2, '0')} · S${scene.sceneNumber}`,
+      W - 54,
+      93
+    );
     ctx.restore();
   }
 
-  // 5. Pop-Up UI Banner / Stamp
+  // 6. Pop-Up UI Banner / Stamp
   const popupStart = scene.popup.startSec ?? 1.8;
   const popupEnd = scene.popup.endSec ?? 12.5;
   if (scene.popup.text && sceneTime >= popupStart && sceneTime <= popupEnd) {
     const enterP = Math.min(1, (sceneTime - popupStart) / 0.25);
     const scalePop = 0.8 + 0.2 * Math.sin(enterP * Math.PI * 0.5);
-    drawPopupBanner(ctx, W, scene.popup.text, scene.popup.color, scalePop, scene.popup.color === 'stamp');
+    drawPopupBanner(
+      ctx,
+      W,
+      scene.popup.text,
+      scene.popup.color,
+      scalePop,
+      scene.popup.color === 'stamp'
+    );
   }
 
-  // 6. Optional AI Director Info Card Pop-Up
+  // 7. Optional AI Director Info Card Pop-Up
   if (scene.infoCard && scene.infoCard.title) {
     const cStart = scene.infoCard.startSec ?? 1.5;
     const cEnd = scene.infoCard.endSec ?? 11.0;
@@ -238,17 +270,17 @@ export function renderStudioFrame(
     }
   }
 
-  // 7. 4-second "ARSIP KELAM INDIS" Editorial Box (Scene 4 or AI triggered)
+  // 8. 4-second "ARSIP KELAM INDIS" Editorial Box (Scene 4 or AI triggered)
   if (scene.arsipBoxText && sceneTime >= 3.5 && sceneTime <= 9.2) {
     drawArsipKelamBox(ctx, W, scene.arsipBoxText);
   }
 
-  // 8. Dynamic Bottom-Center Subtitle (Safe Zone above TikTok/Reels controls)
+  // 9. Dynamic Bottom-Center Subtitle (Safe Zone above TikTok/Reels controls)
   if (activeDialogue) {
     drawDynamicSubtitle(ctx, W, activeDialogue);
   }
 
-  // 9. Scene Transition Overlay (Fade / Flash White)
+  // 10. Scene Transition Overlay (Fade / Flash White)
   if (transProgress < 1) {
     if (scene.transitionIn === 'flash_white') {
       ctx.fillStyle = `rgba(255, 255, 255, ${(1 - transProgress).toFixed(3)})`;
@@ -274,7 +306,7 @@ function computeStageAnchors(count: number, w: number) {
     return [
       { x: w * 0.22, yOffset: 8, scale: 1.18 },
       { x: w * 0.51, yOffset: -12, scale: 1.24 },
-      { x: w * 0.80, yOffset: 10, scale: 1.18 },
+      { x: w * 0.8, yOffset: 10, scale: 1.18 },
     ];
   }
   return [
@@ -314,7 +346,10 @@ function drawPopupBanner(
     return;
   }
 
-  const palette: Record<Exclude<PopupColor, 'stamp'>, { bg: string; border: string; fg: string }> = {
+  const palette: Record<
+    Exclude<PopupColor, 'stamp'>,
+    { bg: string; border: string; fg: string }
+  > = {
     red: { bg: 'rgba(153, 27, 27, 0.92)', border: '#f87171', fg: '#ffffff' },
     yellow: { bg: 'rgba(180, 83, 9, 0.94)', border: '#facc15', fg: '#fef9c3' },
     blue: { bg: 'rgba(30, 58, 138, 0.92)', border: '#60a5fa', fg: '#eff6ff' },
@@ -393,13 +428,11 @@ function drawDynamicSubtitle(
   line: DialogueLine
 ) {
   ctx.save();
-  // Safe zone: y = 1365..1645 (well above TikTok/Reels bottom action bar)
   const boxX = 56;
   const boxY = 1365;
   const boxW = w - 112;
   const boxH = 265;
 
-  // Measured contrast scrim
   ctx.fillStyle = 'rgba(9, 9, 11, 0.84)';
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
   ctx.lineWidth = 2;
@@ -408,18 +441,15 @@ function drawDynamicSubtitle(
   ctx.fill();
   ctx.stroke();
 
-  // Speaker Name Header
   ctx.fillStyle = '#FFC400';
   ctx.font = '800 26px "Plus Jakarta Sans", sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(line.speaker.toUpperCase(), w / 2, boxY + 48);
 
-  // Word-by-word highlight rendering (#FFC400 for important words)
   ctx.font = '700 36px "DM Sans", sans-serif';
   const words = line.text.split(/\s+/);
   const hlLower = line.highlightWords.map((hw) => hw.toLowerCase());
 
-  // Build wrapped lines of words
   const maxWidth = boxW - 88;
   const rows: string[][] = [];
   let currentRow: string[] = [];

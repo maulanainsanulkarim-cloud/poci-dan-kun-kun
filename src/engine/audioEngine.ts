@@ -1,4 +1,109 @@
-import { AudioSlotData } from '../types/studio';
+import { AudioSlotData, DialogueLine, SpeechSegment } from '../types/studio';
+
+/**
+ * Extract contiguous speech bursts from a 30 FPS normalized amplitude envelope
+ */
+export function detectSpeechSegments(
+  envelope30Fps: number[],
+  maxDurationSec = 15
+): { segments: SpeechSegment[]; firstVoiceSec: number; lastVoiceSec: number } {
+  const thresholdOn = 0.14;
+  const thresholdOff = 0.08;
+  const rawSegments: SpeechSegment[] = [];
+
+  let inSpeech = false;
+  let segStart = 0;
+  let peakAmp = 0;
+
+  for (let f = 0; f < envelope30Fps.length; f++) {
+    const t = f / 30;
+    if (t > maxDurationSec) break;
+    const amp = envelope30Fps[f] ?? 0;
+
+    if (!inSpeech && amp >= thresholdOn) {
+      inSpeech = true;
+      segStart = t;
+      peakAmp = amp;
+    } else if (inSpeech) {
+      if (amp > peakAmp) peakAmp = amp;
+      if (amp < thresholdOff) {
+        inSpeech = false;
+        rawSegments.push({ startSec: segStart, endSec: t, peakAmp });
+      }
+    }
+  }
+  if (inSpeech) {
+    rawSegments.push({
+      startSec: segStart,
+      endSec: Math.min(maxDurationSec, envelope30Fps.length / 30),
+      peakAmp,
+    });
+  }
+
+  // Merge segments separated by short breath gaps (< 0.28s) and drop tiny noise blips (< 0.18s)
+  const merged: SpeechSegment[] = [];
+  for (const seg of rawSegments) {
+    if (merged.length > 0 && seg.startSec - merged[merged.length - 1].endSec < 0.28) {
+      const prev = merged[merged.length - 1];
+      prev.endSec = seg.endSec;
+      prev.peakAmp = Math.max(prev.peakAmp, seg.peakAmp);
+    } else {
+      merged.push({ ...seg });
+    }
+  }
+
+  const clean = merged.filter((s) => s.endSec - s.startSec >= 0.18);
+  const firstVoiceSec = clean.length > 0 ? Number(clean[0].startSec.toFixed(2)) : 0.35;
+  const lastVoiceSec =
+    clean.length > 0 ? Number(clean[clean.length - 1].endSec.toFixed(2)) : Math.min(14.5, maxDurationSec);
+
+  return { segments: clean, firstVoiceSec, lastVoiceSec };
+}
+
+/**
+ * Aligns a scene's dialogue lines consistently to the uploaded MP3's voice entry & speech segments
+ */
+export function alignDialoguesToAudio(
+  dialogues: DialogueLine[],
+  slot: AudioSlotData,
+  dubbingOffsetSec = 0
+): DialogueLine[] {
+  if (dialogues.length === 0 || !slot.buffer) return dialogues;
+
+  const segments = slot.speechSegments;
+  const shift = (t: number) => Math.max(0, Math.min(14.95, Number((t + dubbingOffsetSec).toFixed(2))));
+
+  // Case 1: Detected voice bursts match the exact number of dialogue lines -> 1:1 lock!
+  if (segments.length === dialogues.length) {
+    return dialogues.map((d, i) => ({
+      ...d,
+      startSec: shift(segments[i].startSec),
+      endSec: Math.max(shift(segments[i].startSec) + 0.3, shift(segments[i].endSec)),
+    }));
+  }
+
+  // Case 2: Map character-length weights cleanly across the actual active voice span [firstVoiceSec..lastVoiceSec]
+  const activeStart = Math.max(0.05, slot.firstVoiceSec);
+  const activeEnd = Math.min(14.8, Math.max(activeStart + 1.5, slot.lastVoiceSec));
+  const span = activeEnd - activeStart;
+  const gap = Math.min(0.28, span * 0.04);
+  const usable = Math.max(0.5, span - gap * Math.max(0, dialogues.length - 1));
+  const weights = dialogues.map((d) => Math.max(10, d.text.length));
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+
+  let cursor = activeStart;
+  return dialogues.map((d, idx) => {
+    const dur = (weights[idx] / totalWeight) * usable;
+    const s = shift(cursor);
+    const e = shift(cursor + dur);
+    cursor += dur + gap;
+    return {
+      ...d,
+      startSec: s,
+      endSec: Math.max(s + 0.35, e),
+    };
+  });
+}
 
 export class StudioAudioEngine {
   private ctx: AudioContext | null = null;
@@ -10,7 +115,9 @@ export class StudioAudioEngine {
 
   ensureContext(): AudioContext {
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = 1.0;
@@ -30,6 +137,10 @@ export class StudioAudioEngine {
     return this.ctx;
   }
 
+  getAudioTime(): number {
+    return this.ensureContext().currentTime;
+  }
+
   getMediaStreamDestination(): MediaStreamAudioDestinationNode {
     this.ensureContext();
     return this.streamDest!;
@@ -45,18 +156,15 @@ export class StudioAudioEngine {
     return Math.min(1, sum / (this.freqData.length * 140));
   }
 
-  async decodeAudioFile(
-    file: File,
-    sceneIndex: 0 | 1 | 2 | 3
-  ): Promise<AudioSlotData> {
+  async decodeAudioFile(file: File, sceneIndex: 0 | 1 | 2 | 3): Promise<AudioSlotData> {
     const ctx = this.ensureContext();
     const arrayBuf = await file.arrayBuffer();
     const audioBuf = await ctx.decodeAudioData(arrayBuf);
 
     const channel = audioBuf.getChannelData(0);
     const sampleRate = audioBuf.sampleRate;
-    const targetDuration = 15; // 15 seconds per scene
-    const totalFrames = targetDuration * 30; // 450 frames @ 30 FPS
+    const targetDuration = 15;
+    const totalFrames = targetDuration * 30;
     const envelope30Fps: number[] = new Array(totalFrames).fill(0);
 
     let maxRms = 0.001;
@@ -84,7 +192,6 @@ export class StudioAudioEngine {
       envelope30Fps[f] = Math.min(1, envelope30Fps[f] / (maxRms * 0.85));
     }
 
-    // 96-bar waveform peaks for UI visualization
     const barCount = 96;
     const waveformPeaks: number[] = [];
     const blockSize = Math.max(1, Math.floor(channel.length / barCount));
@@ -99,6 +206,11 @@ export class StudioAudioEngine {
       waveformPeaks.push(Math.min(1, peak / Math.max(0.05, maxRms * 1.4)));
     }
 
+    const { segments, firstVoiceSec, lastVoiceSec } = detectSpeechSegments(
+      envelope30Fps,
+      Math.min(15, audioBuf.duration)
+    );
+
     return {
       sceneIndex,
       fileName: file.name,
@@ -106,6 +218,9 @@ export class StudioAudioEngine {
       buffer: audioBuf,
       envelope30Fps,
       waveformPeaks,
+      speechSegments: segments,
+      firstVoiceSec,
+      lastVoiceSec,
     };
   }
 
@@ -121,14 +236,27 @@ export class StudioAudioEngine {
     }
   }
 
-  playDubbingSlot(buffer: AudioBuffer, offsetSec = 0) {
+  /**
+   * Starts dubbing at an exact scene time, honoring dubbingOffsetSec (+ = delay entry, - = trim start)
+   */
+  playDubbingSlot(buffer: AudioBuffer, sceneTimeSec = 0, dubbingOffsetSec = 0) {
     this.stopDubbing();
     const ctx = this.ensureContext();
-    if (!this.masterGain || offsetSec >= buffer.duration) return;
+    if (!this.masterGain) return;
+
+    const audioPos = sceneTimeSec - dubbingOffsetSec;
+    if (audioPos >= buffer.duration) return;
+
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(this.masterGain);
-    source.start(0, Math.max(0, offsetSec));
+
+    if (audioPos < 0) {
+      // Schedule future start cleanly on AudioContext clock!
+      source.start(ctx.currentTime + Math.abs(audioPos), 0);
+    } else {
+      source.start(ctx.currentTime, audioPos);
+    }
     this.activeSource = source;
   }
 
@@ -170,7 +298,6 @@ export class StudioAudioEngine {
       }
 
       case 'giggle': {
-        // Light horror-comedy chuckle arpeggio
         [520, 620, 560, 680].forEach((freq, i) => {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();

@@ -1,18 +1,32 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Play, Square, Trash2, UploadCloud } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Link2,
+  Play,
+  Square,
+  Trash2,
+  UploadCloud,
+} from 'lucide-react';
 import { studioAudio } from '../engine/audioEngine';
-import { AudioSlotData } from '../types/studio';
+import { AudioSlotData, EpisodeConfig } from '../types/studio';
 
 interface DubbingPanelProps {
+  activeEpisode: EpisodeConfig;
   audioSlots: [AudioSlotData, AudioSlotData, AudioSlotData, AudioSlotData];
   onAssignAudioSlot: (sceneIndex: 0 | 1 | 2 | 3, slot: AudioSlotData) => void;
   onClearAudioSlot: (sceneIndex: 0 | 1 | 2 | 3) => void;
+  onChangeDubbingOffset: (sceneIndex: 0 | 1 | 2 | 3, offsetSec: number) => void;
+  onSyncSceneToAudio: (sceneIndex: 0 | 1 | 2 | 3) => void;
 }
 
 export const DubbingPanel: React.FC<DubbingPanelProps> = ({
+  activeEpisode,
   audioSlots,
   onAssignAudioSlot,
   onClearAudioSlot,
+  onChangeDubbingOffset,
+  onSyncSceneToAudio,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [testingSlot, setTestingSlot] = useState<number | null>(null);
@@ -91,7 +105,8 @@ export const DubbingPanel: React.FC<DubbingPanelProps> = ({
       studioAudio.stopDubbing();
       setTestingSlot(null);
     } else {
-      studioAudio.playDubbingSlot(slot.buffer, 0);
+      const dubOffset = activeEpisode.scenes[idx]?.dubbingOffsetSec ?? 0;
+      studioAudio.playDubbingSlot(slot.buffer, 0, dubOffset);
       setTestingSlot(idx);
     }
   };
@@ -121,7 +136,7 @@ export const DubbingPanel: React.FC<DubbingPanelProps> = ({
           Seret & Lepas 4 File Dubbing Sekaligus (s1.mp3 – s4.mp3)
         </p>
         <p className="text-[11px] text-zinc-400 mt-1">
-          Auto-mapping otomatis berdasarkan nama file ke Scene 1–4 & ekstraksi lip-sync 30 FPS.
+          Auto-mapping otomatis, deteksi suara masuk, & kunci animasi/subtitle ke MP3.
         </p>
         <label className="mt-3 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-100 cursor-pointer">
           Pilih File MP3 / WAV
@@ -142,7 +157,7 @@ export const DubbingPanel: React.FC<DubbingPanelProps> = ({
           <div>
             <span className="font-semibold">{emptyCount} slot dubbing masih kosong.</span>{' '}
             <span className="text-amber-300/80">
-              Lip-sync akan otomatis menggunakan ritme dialog teks sampai MP3 diunggah.
+              Lip-sync menggunakan ritme naskah sampai MP3 diunggah. Saat MP3 masuk, timing dialog otomatis dikunci ke suara asli.
             </span>
           </div>
         </div>
@@ -158,7 +173,11 @@ export const DubbingPanel: React.FC<DubbingPanelProps> = ({
       <div className="space-y-3">
         {audioSlots.map((slot, idx) => {
           const sceneIdx = idx as 0 | 1 | 2 | 3;
+          const scene = activeEpisode.scenes[sceneIdx];
+          const dubOffset = scene?.dubbingOffsetSec ?? 0;
           const isTesting = testingSlot === idx;
+          const barTotal = Math.min(64, slot.waveformPeaks.length || 64);
+
           return (
             <div
               key={idx}
@@ -230,18 +249,78 @@ export const DubbingPanel: React.FC<DubbingPanelProps> = ({
                 </div>
               </div>
 
-              {/* Waveform Bars + Live VU during Tes */}
+              {/* Waveform Bars with Detected Speech Segments + Offset & Sync Controls */}
               {slot.buffer && (
-                <div className="space-y-1.5">
+                <div className="space-y-2.5">
                   <div className="h-9 bg-zinc-900/90 rounded-lg px-2 flex items-center gap-[2px] overflow-hidden border border-zinc-800/80">
-                    {slot.waveformPeaks.slice(0, 64).map((peak, pIdx) => (
-                      <div
-                        key={pIdx}
-                        className="flex-1 bg-amber-500/80 rounded-full"
-                        style={{ height: `${Math.max(12, Math.round(peak * 100))}%` }}
-                      />
-                    ))}
+                    {slot.waveformPeaks.slice(0, 64).map((peak, pIdx) => {
+                      const barSec = (pIdx / barTotal) * Math.min(15, slot.duration || 15);
+                      const inSpeech = slot.speechSegments.some(
+                        (seg) => barSec >= seg.startSec && barSec <= seg.endSec
+                      );
+                      return (
+                        <div
+                          key={pIdx}
+                          className={`flex-1 rounded-full ${
+                            inSpeech ? 'bg-amber-400' : 'bg-zinc-600/60'
+                          }`}
+                          style={{ height: `${Math.max(12, Math.round(peak * 100))}%` }}
+                        />
+                      );
+                    })}
                   </div>
+
+                  <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+                    <span>
+                      Suara masuk:{' '}
+                      <strong className="text-emerald-300">
+                        {(slot.firstVoiceSec + dubOffset).toFixed(2)}s
+                      </strong>
+                    </span>
+                    <span>{slot.speechSegments.length} segmen vokal</span>
+                  </div>
+
+                  {/* Dubbing Entry Offset Slider */}
+                  <div className="p-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/60 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-zinc-300 font-medium">
+                        Geser Masuk Dubbing (Offset)
+                      </span>
+                      <span className="font-mono text-amber-400 tabular-nums">
+                        {dubOffset >= 0 ? `+${dubOffset.toFixed(2)}s` : `${dubOffset.toFixed(2)}s`}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-2.0}
+                      max={3.0}
+                      step={0.05}
+                      value={dubOffset}
+                      onChange={(e) =>
+                        onChangeDubbingOffset(sceneIdx, parseFloat(e.target.value))
+                      }
+                      aria-label={`Offset masuk dubbing scene ${idx + 1}`}
+                      className="w-full h-1.5 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => onChangeDubbingOffset(sceneIdx, 0)}
+                        className="text-[11px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                      >
+                        Reset 0.00s
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onSyncSceneToAudio(sceneIdx)}
+                        className="px-2.5 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-300 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                      >
+                        <Link2 className="w-3 h-3" />
+                        Sinkronkan Animasi & Naskah
+                      </button>
+                    </div>
+                  </div>
+
                   {isTesting && (
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] font-mono text-emerald-400">LIVE VU</span>

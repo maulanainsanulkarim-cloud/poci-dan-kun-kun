@@ -7,8 +7,12 @@ import { DubbingPanel } from './components/DubbingPanel';
 import { EpisodeScriptPanel } from './components/EpisodeScriptPanel';
 import { StudioTabId, TopBar } from './components/TopBar';
 import { INITIAL_CHARACTERS } from './data/characters';
-import { PRESET_EPISODES } from './data/episodes';
-import { studioAudio } from './engine/audioEngine';
+import {
+  ensureSpeakersInCast,
+  PRESET_EPISODES,
+  redistributeDialoguesByTextLength,
+} from './data/episodes';
+import { alignDialoguesToAudio, studioAudio } from './engine/audioEngine';
 import {
   AIDirectiveResponse,
   AudioSlotData,
@@ -25,6 +29,9 @@ function makeEmptySlot(sceneIndex: 0 | 1 | 2 | 3): AudioSlotData {
     buffer: null,
     envelope30Fps: [],
     waveformPeaks: [],
+    speechSegments: [],
+    firstVoiceSec: 0,
+    lastVoiceSec: 15,
   };
 }
 
@@ -66,7 +73,20 @@ export default function App() {
   const activeScene = currentEpisode.scenes[activeSceneIdx];
   const sceneLocalTime = currentTime - activeSceneIdx * 15;
 
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+
+  const currentEpisodeRef = useRef(currentEpisode);
+  currentEpisodeRef.current = currentEpisode;
+
+  const audioSlotsRef = useRef(audioSlots);
+  audioSlotsRef.current = audioSlots;
+
   const lastSceneAudioRef = useRef<number>(-1);
+  const playAnchorRef = useRef<{ simTime: number; audioTime: number }>({
+    simTime: 0,
+    audioTime: 0,
+  });
 
   const syncDubbingAudioForTime = useCallback(
     (timeSec: number, shouldPlay: boolean) => {
@@ -79,42 +99,50 @@ export default function App() {
       const offset = timeSec - scIdx * 15;
       if (lastSceneAudioRef.current !== scIdx) {
         lastSceneAudioRef.current = scIdx;
-        const buf = audioSlots[scIdx]?.buffer;
+        const buf = audioSlotsRef.current[scIdx]?.buffer;
+        const dubOffset = currentEpisodeRef.current.scenes[scIdx]?.dubbingOffsetSec ?? 0;
         if (buf) {
-          studioAudio.playDubbingSlot(buf, offset);
+          studioAudio.playDubbingSlot(buf, offset, dubOffset);
         } else {
           studioAudio.stopDubbing();
         }
       }
     },
-    [audioSlots]
+    []
   );
 
-  // 30 FPS playback loop
+  // 30 FPS playback loop locked to AudioContext master clock so dubbing & animation never drift
   useEffect(() => {
     if (!isPlaying || isExporting) return;
     let rafId = 0;
-    let lastPerf = performance.now();
 
-    syncDubbingAudioForTime(currentTime, true);
+    playAnchorRef.current = {
+      simTime: currentTimeRef.current,
+      audioTime: studioAudio.getAudioTime(),
+    };
+    syncDubbingAudioForTime(currentTimeRef.current, true);
 
-    const tick = (now: number) => {
-      const dt = (now - lastPerf) / 1000;
-      lastPerf = now;
-      setCurrentTime((prev) => {
-        const next = prev + dt;
-        if (next >= 60) {
-          setIsPlaying(false);
-          studioAudio.stopDubbing();
-          lastSceneAudioRef.current = -1;
-          return 0;
-        }
-        const nextSc = Math.min(3, Math.floor(next / 15));
-        if (nextSc !== lastSceneAudioRef.current) {
-          syncDubbingAudioForTime(next, true);
-        }
-        return next;
-      });
+    const tick = () => {
+      const elapsed = Math.max(
+        0,
+        studioAudio.getAudioTime() - playAnchorRef.current.audioTime
+      );
+      const next = playAnchorRef.current.simTime + elapsed;
+
+      if (next >= 60) {
+        setIsPlaying(false);
+        studioAudio.stopDubbing();
+        lastSceneAudioRef.current = -1;
+        setCurrentTime(0);
+        return;
+      }
+
+      const nextSc = Math.min(3, Math.floor(next / 15));
+      if (nextSc !== lastSceneAudioRef.current) {
+        syncDubbingAudioForTime(next, true);
+      }
+
+      setCurrentTime(next);
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
@@ -134,7 +162,12 @@ export default function App() {
   const handleSeek = (sec: number) => {
     const clamped = Math.max(0, Math.min(59.96, sec));
     setCurrentTime(clamped);
+    currentTimeRef.current = clamped;
     if (isPlaying) {
+      playAnchorRef.current = {
+        simTime: clamped,
+        audioTime: studioAudio.getAudioTime(),
+      };
       lastSceneAudioRef.current = -1;
       syncDubbingAudioForTime(clamped, true);
     }
@@ -144,6 +177,11 @@ export default function App() {
     studioAudio.ensureContext();
     lastSceneAudioRef.current = -1;
     setCurrentTime(0);
+    currentTimeRef.current = 0;
+    playAnchorRef.current = {
+      simTime: 0,
+      audioTime: studioAudio.getAudioTime(),
+    };
     setIsPlaying(true);
   };
 
@@ -155,16 +193,58 @@ export default function App() {
     setIsPlaying(false);
     setSelectedEpisodeId(epId);
     setCurrentTime(0);
+    currentTimeRef.current = 0;
+
+    // Align newly selected episode's dialogues if any MP3 slots are already loaded
+    setEpisodes((prev) =>
+      prev.map((ep) => {
+        if (ep.id !== epId) return ep;
+        const nextScenes = ep.scenes.map((sc, idx) => {
+          const slot = audioSlotsRef.current[idx];
+          if (slot?.buffer) {
+            return {
+              ...sc,
+              dialogues: alignDialoguesToAudio(
+                sc.dialogues,
+                slot,
+                sc.dubbingOffsetSec ?? 0
+              ),
+            };
+          }
+          return sc;
+        }) as [SceneConfig, SceneConfig, SceneConfig, SceneConfig];
+        return { ...ep, scenes: nextScenes };
+      })
+    );
   };
 
   const handleCreateEpisode = (newEp: EpisodeConfig) => {
-    setEpisodes((prev) => [newEp, ...prev]);
-    setSelectedEpisodeId(newEp.id);
+    // Also align to loaded audio slots if present
+    const alignedScenes = newEp.scenes.map((sc, idx) => {
+      const slot = audioSlotsRef.current[idx];
+      if (slot?.buffer) {
+        return {
+          ...sc,
+          dialogues: alignDialoguesToAudio(
+            sc.dialogues,
+            slot,
+            sc.dubbingOffsetSec ?? 0
+          ),
+        };
+      }
+      return sc;
+    }) as [SceneConfig, SceneConfig, SceneConfig, SceneConfig];
+
+    const finalEp = { ...newEp, scenes: alignedScenes };
+    setEpisodes((prev) => [finalEp, ...prev]);
+    setSelectedEpisodeId(finalEp.id);
     setCurrentTime(0);
+    currentTimeRef.current = 0;
     setIsPlaying(false);
   };
 
   const handleUpdateScene = (sceneIdx: 0 | 1 | 2 | 3, updatedScene: SceneConfig) => {
+    const syncedScene = ensureSpeakersInCast(updatedScene);
     setEpisodes((prev) =>
       prev.map((ep) => {
         if (ep.id !== selectedEpisodeId) return ep;
@@ -174,10 +254,64 @@ export default function App() {
           SceneConfig,
           SceneConfig,
         ];
-        nextScenes[sceneIdx] = updatedScene;
+        nextScenes[sceneIdx] = syncedScene;
         return { ...ep, scenes: nextScenes };
       })
     );
+  };
+
+  const handleSyncSceneToAudio = (sceneIndex: 0 | 1 | 2 | 3) => {
+    const slot = audioSlotsRef.current[sceneIndex];
+    setEpisodes((prev) =>
+      prev.map((ep) => {
+        if (ep.id !== selectedEpisodeId) return ep;
+        const nextScenes = [...ep.scenes] as [
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+        ];
+        const sc = nextScenes[sceneIndex];
+        const alignedDialogues = slot?.buffer
+          ? alignDialoguesToAudio(sc.dialogues, slot, sc.dubbingOffsetSec ?? 0)
+          : redistributeDialoguesByTextLength(sc.dialogues);
+        nextScenes[sceneIndex] = ensureSpeakersInCast({
+          ...sc,
+          dialogues: alignedDialogues,
+        });
+        return { ...ep, scenes: nextScenes };
+      })
+    );
+  };
+
+  const handleChangeDubbingOffset = (sceneIndex: 0 | 1 | 2 | 3, offsetSec: number) => {
+    const clamped = Math.max(-2.0, Math.min(3.0, Number(offsetSec.toFixed(2))));
+    const slot = audioSlotsRef.current[sceneIndex];
+    setEpisodes((prev) =>
+      prev.map((ep) => {
+        if (ep.id !== selectedEpisodeId) return ep;
+        const nextScenes = [...ep.scenes] as [
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+        ];
+        const sc = nextScenes[sceneIndex];
+        const nextDialogues = slot?.buffer
+          ? alignDialoguesToAudio(sc.dialogues, slot, clamped)
+          : sc.dialogues;
+        nextScenes[sceneIndex] = {
+          ...sc,
+          dubbingOffsetSec: clamped,
+          dialogues: nextDialogues,
+        };
+        return { ...ep, scenes: nextScenes };
+      })
+    );
+
+    if (isPlaying && activeSceneIdx === sceneIndex && slot?.buffer) {
+      studioAudio.playDubbingSlot(slot.buffer, sceneLocalTime, clamped);
+    }
   };
 
   const handleUpdateWatermarkText = (text: string) => {
@@ -205,6 +339,29 @@ export default function App() {
       next[sceneIndex] = slot;
       return next;
     });
+
+    // Automatically align dialogue lines & animation cues to real MP3 voice bursts!
+    setEpisodes((prev) =>
+      prev.map((ep) => {
+        if (ep.id !== selectedEpisodeId) return ep;
+        const nextScenes = [...ep.scenes] as [
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+          SceneConfig,
+        ];
+        const sc = nextScenes[sceneIndex];
+        nextScenes[sceneIndex] = {
+          ...sc,
+          dialogues: alignDialoguesToAudio(
+            sc.dialogues,
+            slot,
+            sc.dubbingOffsetSec ?? 0
+          ),
+        };
+        return { ...ep, scenes: nextScenes };
+      })
+    );
   };
 
   const handleClearAudioSlot = (sceneIndex: 0 | 1 | 2 | 3) => {
@@ -215,14 +372,7 @@ export default function App() {
         AudioSlotData,
         AudioSlotData,
       ];
-      next[sceneIndex] = {
-        sceneIndex,
-        fileName: null,
-        duration: 0,
-        buffer: null,
-        envelope30Fps: [],
-        waveformPeaks: [],
-      };
+      next[sceneIndex] = makeEmptySlot(sceneIndex);
       return next;
     });
   };
@@ -239,7 +389,7 @@ export default function App() {
         ];
         for (const patch of directive.scenePatches || []) {
           const idx = Math.max(0, Math.min(3, patch.sceneIndex)) as 0 | 1 | 2 | 3;
-          const sc = { ...nextScenes[idx] };
+          let sc = { ...nextScenes[idx] };
           if (patch.weather) sc.weather = patch.weather;
           if (patch.lighting) sc.lighting = patch.lighting;
           if (patch.backgroundId) sc.backgroundId = patch.backgroundId;
@@ -282,7 +432,16 @@ export default function App() {
                 highlightWords: [],
               },
             ];
+            const slot = audioSlotsRef.current[idx];
+            if (slot?.buffer) {
+              sc.dialogues = alignDialoguesToAudio(
+                sc.dialogues,
+                slot,
+                sc.dubbingOffsetSec ?? 0
+              );
+            }
           }
+          sc = ensureSpeakersInCast(sc);
           nextScenes[idx] = sc;
         }
         return {
@@ -293,7 +452,6 @@ export default function App() {
       })
     );
 
-    // Jump preview to first patched scene so user immediately sees the change
     if (directive.scenePatches && directive.scenePatches.length > 0) {
       const firstIdx = Math.max(0, Math.min(3, directive.scenePatches[0].sceneIndex));
       handleSeek(firstIdx * 15 + 2.5);
@@ -354,18 +512,23 @@ export default function App() {
               episodes={episodes}
               selectedEpisodeId={selectedEpisodeId}
               activeSceneIdx={activeSceneIdx}
+              audioSlots={audioSlots}
               onSelectEpisode={handleSelectEpisode}
               onCreateEpisode={handleCreateEpisode}
               onUpdateScene={handleUpdateScene}
               onJumpToScene={handleJumpToScene}
+              onSyncSceneToAudio={handleSyncSceneToAudio}
             />
           )}
 
           {activeTab === 'dubbing' && (
             <DubbingPanel
+              activeEpisode={currentEpisode}
               audioSlots={audioSlots}
               onAssignAudioSlot={handleAssignAudioSlot}
               onClearAudioSlot={handleClearAudioSlot}
+              onChangeDubbingOffset={handleChangeDubbingOffset}
+              onSyncSceneToAudio={handleSyncSceneToAudio}
             />
           )}
 
@@ -445,8 +608,8 @@ export default function App() {
                   >
                     <div className="flex items-center justify-between text-[11px] mb-1">
                       <span className="font-semibold text-amber-400">{d.speaker}</span>
-                      <span className="font-mono text-zinc-500">
-                        {d.startSec.toFixed(1)}s
+                      <span className="font-mono text-zinc-500 tabular-nums">
+                        {d.startSec.toFixed(1)}s – {d.endSec.toFixed(1)}s
                       </span>
                     </div>
                     <p className="text-xs text-zinc-200 leading-relaxed">{d.text}</p>

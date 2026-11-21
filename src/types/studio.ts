@@ -121,6 +121,7 @@ export interface SceneConfig {
   transitionIn: TransitionType;
   cameraAction: CameraActionMode;
   cameraShakeIntensity: number; // 0..1
+  dubbingOffsetSec?: number; // -2.0 .. +3.0s shift for dubbing entry vs animation
   cast: string[]; // character IDs appearing in this scene
   popup: PopupBanner;
   arsipBoxText?: string; // 4s "ARSIP KELAM INDIS" box
@@ -139,13 +140,22 @@ export interface EpisodeConfig {
   scenes: [SceneConfig, SceneConfig, SceneConfig, SceneConfig];
 }
 
+export interface SpeechSegment {
+  startSec: number;
+  endSec: number;
+  peakAmp: number;
+}
+
 export interface AudioSlotData {
   sceneIndex: 0 | 1 | 2 | 3;
   fileName: string | null;
   duration: number;
   buffer: AudioBuffer | null;
   envelope30Fps: number[]; // 450 normalized amplitude values (0..1)
-  waveformPeaks: number[]; // ~100 bars for UI visualization
+  waveformPeaks: number[]; // ~96 bars for UI visualization
+  speechSegments: SpeechSegment[];
+  firstVoiceSec: number;
+  lastVoiceSec: number;
 }
 
 export interface AIDirectiveScenePatch {

@@ -1,29 +1,61 @@
 import React, { useState } from 'react';
-import { FileText, Plus, Sparkles, Upload } from 'lucide-react';
-import { parseRawScriptToEpisode } from '../data/episodes';
-import { EpisodeConfig, PopupColor, SceneConfig } from '../types/studio';
+import { FileText, Link2, Plus, Sparkles, Trash2, Upload } from 'lucide-react';
+import {
+  autoHighlightWords,
+  inferActionCue,
+  parseRawScriptToEpisode,
+} from '../data/episodes';
+import {
+  AudioSlotData,
+  CharacterActionCue,
+  EpisodeConfig,
+  PopupColor,
+  SceneConfig,
+} from '../types/studio';
 
 interface EpisodeScriptPanelProps {
   episodes: EpisodeConfig[];
   selectedEpisodeId: string;
   activeSceneIdx: 0 | 1 | 2 | 3;
+  audioSlots: [AudioSlotData, AudioSlotData, AudioSlotData, AudioSlotData];
   onSelectEpisode: (epId: string) => void;
   onCreateEpisode: (newEp: EpisodeConfig) => void;
   onUpdateScene: (sceneIdx: 0 | 1 | 2 | 3, updated: SceneConfig) => void;
   onJumpToScene: (sceneIdx: 0 | 1 | 2 | 3) => void;
+  onSyncSceneToAudio: (sceneIndex: 0 | 1 | 2 | 3) => void;
 }
+
+const ACTION_CUE_OPTIONS: Array<{ value: CharacterActionCue; label: string }> = [
+  { value: 'point', label: 'Menunjuk / Bicara' },
+  { value: 'idle', label: 'Diam Bernapas' },
+  { value: 'hop', label: 'Melompat (Boing)' },
+  { value: 'plank', label: 'Tengkurap / Lemas' },
+  { value: 'sip_coffee', label: 'Menyeruput Kopi' },
+  { value: 'laugh', label: 'Tertawa / Cekikikan' },
+  { value: 'inhale_smoke', label: 'Mengisap Cerutu' },
+  { value: 'sneak', label: 'Mengendap / Lari' },
+  { value: 'shock', label: 'Kaget / Melongo' },
+  { value: 'gavel_slam', label: 'Ketok Palu / Meja' },
+  { value: 'dance', label: 'Joget Gemoy' },
+  { value: 'rub_eyes', label: 'Mengucek Mata' },
+  { value: 'type_fast', label: 'Mengetik Cepat HP' },
+  { value: 'wave_smug', label: 'Melambai Anggun' },
+];
 
 export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
   episodes,
   selectedEpisodeId,
   activeSceneIdx,
+  audioSlots,
   onSelectEpisode,
   onCreateEpisode,
   onUpdateScene,
   onJumpToScene,
+  onSyncSceneToAudio,
 }) => {
   const currentEpisode = episodes.find((e) => e.id === selectedEpisodeId) ?? episodes[0];
   const currentScene = currentEpisode.scenes[activeSceneIdx];
+  const activeSlot = audioSlots[activeSceneIdx];
 
   const [showCreator, setShowCreator] = useState(false);
   const [newTitle, setNewTitle] = useState('');
@@ -55,21 +87,46 @@ export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
 
   const updateDialogueField = (
     lineIdx: number,
-    field: 'speaker' | 'text' | 'highlightWords',
-    value: string
+    field: 'speaker' | 'text' | 'highlightWords' | 'actionCue' | 'startSec' | 'endSec',
+    value: string | number
   ) => {
     const nextDialogues = currentScene.dialogues.map((d, idx) => {
       if (idx !== lineIdx) return d;
       if (field === 'highlightWords') {
         return {
           ...d,
-          highlightWords: value
+          highlightWords: String(value)
             .split(',')
             .map((w) => w.trim())
             .filter(Boolean),
         };
       }
-      return { ...d, [field]: value };
+      if (field === 'startSec') {
+        const s = Math.max(0, Math.min(14.5, Number(value) || 0));
+        return { ...d, startSec: s, endSec: Math.max(s + 0.3, d.endSec) };
+      }
+      if (field === 'endSec') {
+        const e = Math.max(d.startSec + 0.3, Math.min(15, Number(value) || 1));
+        return { ...d, endSec: e };
+      }
+      if (field === 'actionCue') {
+        return { ...d, actionCue: value as CharacterActionCue };
+      }
+      if (field === 'text') {
+        const textVal = String(value);
+        const autoCue = inferActionCue(d.speaker, textVal);
+        const autoHl = d.highlightWords.length === 0 ? autoHighlightWords(textVal) : d.highlightWords;
+        return { ...d, text: textVal, actionCue: autoCue, highlightWords: autoHl };
+      }
+      if (field === 'speaker') {
+        const speakerVal = String(value);
+        return {
+          ...d,
+          speaker: speakerVal,
+          actionCue: inferActionCue(speakerVal, d.text),
+        };
+      }
+      return d;
     });
     onUpdateScene(activeSceneIdx, { ...currentScene, dialogues: nextDialogues });
   };
@@ -81,17 +138,25 @@ export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
         : 0.5;
     const startSec = Math.min(13.5, Number((lastEnd + 0.3).toFixed(2)));
     const endSec = Math.min(14.8, Number((startSec + 2.5).toFixed(2)));
+    const text = 'Dialog baru di adegan ini...';
     const next = [
       ...currentScene.dialogues,
       {
         id: `s${activeSceneIdx + 1}_d${Date.now()}`,
         speaker: 'POCI',
-        text: 'Dialog baru di adegan ini...',
+        text,
         startSec,
         endSec,
         highlightWords: ['baru'],
+        actionCue: inferActionCue('POCI', text),
       },
     ];
+    onUpdateScene(activeSceneIdx, { ...currentScene, dialogues: next });
+  };
+
+  const removeDialogueLine = (lineIdx: number) => {
+    if (currentScene.dialogues.length <= 1) return;
+    const next = currentScene.dialogues.filter((_, idx) => idx !== lineIdx);
     onUpdateScene(activeSceneIdx, { ...currentScene, dialogues: next });
   };
 
@@ -226,6 +291,21 @@ export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
             />
           </div>
 
+          <div>
+            <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+              Pengarahan Visual & Aksi Animasi (Otomatis Menggerakkan Karakter & Properti)
+            </label>
+            <textarea
+              rows={2}
+              value={currentScene.visualDesc}
+              onChange={(e) =>
+                onUpdateScene(activeSceneIdx, { ...currentScene, visualDesc: e.target.value })
+              }
+              placeholder="Contoh: Poci melompat menghindari tetesan, Tuyul mengendap, asap hijau keluar..."
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-100 leading-relaxed"
+            />
+          </div>
+
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2">
               <label className="block text-[11px] font-medium text-zinc-400 mb-1">
@@ -286,19 +366,29 @@ export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
         </div>
       </div>
 
-      {/* Editable Dialogue Lines & Subtitle Highlighting */}
+      {/* Editable Dialogue Lines, Timing, Gesture Cue & Subtitle Highlighting */}
       <div className="border-t border-zinc-800 pt-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-semibold text-zinc-200">
-            Dialog & Subtitle Dinamis (Highlight Kuning)
+            Dialog, Timing & Aksi Karakter
           </span>
-          <button
-            type="button"
-            onClick={addDialogueLine}
-            className="text-xs text-amber-400 hover:text-amber-300 font-medium cursor-pointer"
-          >
-            + Tambah Baris
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onSyncSceneToAudio(activeSceneIdx)}
+              className="px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] text-emerald-300 font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <Link2 className="w-3 h-3" />
+              {activeSlot?.buffer ? 'Kunci ke MP3' : 'Ratakan Waktu'}
+            </button>
+            <button
+              type="button"
+              onClick={addDialogueLine}
+              className="text-xs text-amber-400 hover:text-amber-300 font-medium cursor-pointer"
+            >
+              + Baris
+            </button>
+          </div>
         </div>
 
         <div className="space-y-2.5">
@@ -312,27 +402,76 @@ export const EpisodeScriptPanel: React.FC<EpisodeScriptPanelProps> = ({
                   type="text"
                   value={line.speaker}
                   onChange={(e) => updateDialogueField(idx, 'speaker', e.target.value)}
-                  className="w-32 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] font-semibold text-amber-400"
+                  className="w-28 rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] font-semibold text-amber-400"
                 />
-                <span className="font-mono text-[11px] text-zinc-500">
-                  {line.startSec.toFixed(1)}s – {line.endSec.toFixed(1)}s
-                </span>
+                <div className="flex items-center gap-1 text-[11px] font-mono text-zinc-400">
+                  <input
+                    type="number"
+                    min={0}
+                    max={14.5}
+                    step={0.1}
+                    value={line.startSec}
+                    onChange={(e) => updateDialogueField(idx, 'startSec', e.target.value)}
+                    aria-label="Waktu mulai dialog"
+                    className="w-14 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-center text-zinc-200 tabular-nums"
+                  />
+                  <span>–</span>
+                  <input
+                    type="number"
+                    min={0.3}
+                    max={15}
+                    step={0.1}
+                    value={line.endSec}
+                    onChange={(e) => updateDialogueField(idx, 'endSec', e.target.value)}
+                    aria-label="Waktu selesai dialog"
+                    className="w-14 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-center text-zinc-200 tabular-nums"
+                  />
+                  <span>s</span>
+                </div>
+                {currentScene.dialogues.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeDialogueLine(idx)}
+                    aria-label="Hapus baris dialog"
+                    className="p-1 text-zinc-500 hover:text-red-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
+
               <textarea
                 rows={2}
                 value={line.text}
                 onChange={(e) => updateDialogueField(idx, 'text', e.target.value)}
                 className="w-full rounded border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 leading-relaxed"
               />
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-zinc-500 shrink-0">Highlight:</span>
-                <input
-                  type="text"
-                  value={line.highlightWords.join(', ')}
-                  onChange={(e) => updateDialogueField(idx, 'highlightWords', e.target.value)}
-                  placeholder="kata penting, pisah koma..."
-                  className="w-full rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-amber-300"
-                />
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-500 shrink-0">Gerak:</span>
+                  <select
+                    value={line.actionCue ?? 'point'}
+                    onChange={(e) => updateDialogueField(idx, 'actionCue', e.target.value)}
+                    className="w-full rounded border border-zinc-800 bg-zinc-900 px-1.5 py-1 text-[11px] text-zinc-200"
+                  >
+                    {ACTION_CUE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-500 shrink-0">Sorot:</span>
+                  <input
+                    type="text"
+                    value={line.highlightWords.join(', ')}
+                    onChange={(e) => updateDialogueField(idx, 'highlightWords', e.target.value)}
+                    placeholder="kata penting..."
+                    className="w-full rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-amber-300"
+                  />
+                </div>
               </div>
             </div>
           ))}
