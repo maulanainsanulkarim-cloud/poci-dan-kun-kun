@@ -10,6 +10,7 @@ import {
 import {
   drawBackgroundScene,
   drawLightingOverlay,
+  drawVolumetricStageDepth,
   drawWeatherParticles,
 } from './backgrounds';
 import { drawArticulatedCharacter } from './characterRenderer';
@@ -24,13 +25,16 @@ import {
   evaluateScriptChoreography,
 } from './scriptChoreographer';
 
-const rigPool = new Map<string, CharacterSpringRig>();
+const defaultRigPool = new Map<string, CharacterSpringRig>();
 
-function getSpringRig(charId: string): CharacterSpringRig {
-  let rig = rigPool.get(charId);
+function getSpringRig(
+  charId: string,
+  pool: Map<string, CharacterSpringRig> = defaultRigPool
+): CharacterSpringRig {
+  let rig = pool.get(charId);
   if (!rig) {
     rig = createCharacterSpringRig();
-    rigPool.set(charId, rig);
+    pool.set(charId, rig);
   }
   return rig;
 }
@@ -42,6 +46,7 @@ export interface CompositorOptions {
   globalTime: number; // 0..60
   showWatermark: boolean;
   cameraAutoZoom: boolean;
+  rigPoolOverride?: Map<string, CharacterSpringRig>;
 }
 
 export function renderStudioFrame(
@@ -52,8 +57,16 @@ export function renderStudioFrame(
   const H = 1920;
   const GROUND_Y = 1275;
 
-  const { episode, characters, audioSlots, globalTime, showWatermark, cameraAutoZoom } =
-    options;
+  const {
+    episode,
+    characters,
+    audioSlots,
+    globalTime,
+    showWatermark,
+    cameraAutoZoom,
+    rigPoolOverride,
+  } = options;
+  const activePool = rigPoolOverride ?? defaultRigPool;
 
   const clampedTime = Math.max(0, Math.min(59.999, globalTime));
   const sceneIndex = Math.min(3, Math.floor(clampedTime / 15)) as 0 | 1 | 2 | 3;
@@ -88,7 +101,7 @@ export function renderStudioFrame(
     speakerIdx
   );
 
-  // Speaker world X for cinematic camera pan/zoom
+  // Speaker world X for cinematic 2.5D camera pan/zoom
   const speakerChoreo = activeSpeakerId ? choreographyMap.get(activeSpeakerId) : undefined;
   const targetFocusX = speakerChoreo
     ? speakerChoreo.x
@@ -142,12 +155,11 @@ export function renderStudioFrame(
     ctx.translate(-W / 2, -H / 2);
   }
 
-  // Apply Cinematic Camera
-  ctx.translate(W / 2 + camOffsetX + shakeX, H / 2 + camOffsetY + shakeY);
-  ctx.scale(camZoom, camZoom);
+  // 1. Far Background Layer with 2.5D parallax (moves slightly slower than foreground!)
+  ctx.save();
+  ctx.translate(W / 2 + camOffsetX * 0.65 + shakeX * 0.7, H / 2 + camOffsetY * 0.7 + shakeY * 0.7);
+  ctx.scale(1.04 + (camZoom - 1) * 0.55, 1.04 + (camZoom - 1) * 0.55);
   ctx.translate(-W / 2, -H / 2);
-
-  // 1. Background Layer
   drawBackgroundScene(
     ctx,
     W,
@@ -158,12 +170,18 @@ export function renderStudioFrame(
     clampedTime,
     sceneTime
   );
+  ctx.restore();
+
+  // Apply Cinematic Foreground Camera (Characters + Midground Props)
+  ctx.translate(W / 2 + camOffsetX + shakeX, H / 2 + camOffsetY + shakeY);
+  ctx.scale(camZoom, camZoom);
+  ctx.translate(-W / 2, -H / 2);
 
   // 2. Script-matched Animated Story Props Layer
   const storyProps = detectStoryPropsFromScript(scene);
   drawScriptStoryProps(ctx, storyProps, W, GROUND_Y, sceneTime);
 
-  // 3. Characters Layer
+  // 3. Characters Layer (3D Volumetric Rigs)
   const windStrength =
     scene.weather === 'rain' || scene.lighting === 'storm'
       ? 1.4
@@ -175,7 +193,7 @@ export function renderStudioFrame(
     const profile = characters.find((c) => c.id === cid) ?? characters[0];
     if (!profile) return;
 
-    const rig = getSpringRig(cid);
+    const rig = getSpringRig(cid, activePool);
     const choreo = choreographyMap.get(cid) ?? {
       ...stageAnchors[idx],
       actionCue: 'idle' as const,
@@ -212,7 +230,8 @@ export function renderStudioFrame(
     );
   });
 
-  // 4. Atmospheric Weather & Lighting Grade
+  // 4. 3D Volumetric Beams, Bokeh Depth, Weather & Lighting Grade
+  drawVolumetricStageDepth(ctx, W, H, clampedTime, camOffsetX);
   drawWeatherParticles(ctx, W, H, GROUND_Y, scene.weather, clampedTime);
   drawLightingOverlay(ctx, W, H, scene.lighting, clampedTime);
 

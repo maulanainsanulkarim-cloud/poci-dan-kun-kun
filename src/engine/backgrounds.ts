@@ -1,4 +1,10 @@
 import { BackgroundPresetId, LightingPreset, WeatherType } from '../types/studio';
+import {
+  create3DSphereGradient,
+  draw3DExtrudedBox,
+  draw3DPerspectiveRoom,
+  shadeHex,
+} from './volumetric3D';
 
 export const BACKGROUND_PRESETS: Array<{ id: BackgroundPresetId; label: string }> = [
   { id: 'kantor_bocor', label: 'Kantor Kelurahan Bocor' },
@@ -58,7 +64,6 @@ export function drawBackgroundScene(
   globalTime: number,
   sceneTime: number
 ) {
-  // Custom uploaded background
   if (bgId === 'custom' && customBgUrl) {
     const img = getCachedImage(customBgUrl);
     if (img) {
@@ -66,7 +71,6 @@ export function drawBackgroundScene(
       const dw = img.width * scale;
       const dh = img.height * scale;
       ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
-      // Subtle floor gradient anchor so characters sit solidly
       const floorGrad = ctx.createLinearGradient(0, groundY - 90, 0, h);
       floorGrad.addColorStop(0, 'rgba(9,9,11,0)');
       floorGrad.addColorStop(0.4, 'rgba(9,9,11,0.55)');
@@ -79,27 +83,44 @@ export function drawBackgroundScene(
 
   switch (bgId) {
     case 'kantor_bocor': {
-      drawIndoorRoom(ctx, w, h, groundY, '#1c222b', '#272f3b', '#14181f');
-      // Leaky ceiling hole
-      ctx.fillStyle = '#090d14';
+      draw3DPerspectiveRoom(ctx, w, h, groundY, '#161b24', '#272f3b', '#14181f');
+      // 3D Volumetric ceiling leak hole + beam
+      ctx.fillStyle = '#070a0f';
       ctx.beginPath();
-      ctx.ellipse(310, 120, 120, 42, -0.08, 0, Math.PI * 2);
+      ctx.ellipse(310, 125, 125, 42, -0.06, 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = '#3f4b5e';
       ctx.lineWidth = 6;
       ctx.stroke();
 
-      // Animated water drips into bucket
+      // Shaft of dim ceiling light
+      const shaft = ctx.createLinearGradient(310, 125, 310, groundY);
+      shaft.addColorStop(0, 'rgba(186, 230, 253, 0.14)');
+      shaft.addColorStop(1, 'rgba(186, 230, 253, 0)');
+      ctx.fillStyle = shaft;
+      ctx.beginPath();
+      ctx.moveTo(220, 125);
+      ctx.lineTo(400, 125);
+      ctx.lineTo(470, groundY);
+      ctx.lineTo(150, groundY);
+      ctx.closePath();
+      ctx.fill();
+
+      // Animated 3D water drips into bucket
       for (let i = 0; i < 4; i++) {
         const dropY = 140 + ((globalTime * 520 + i * 280) % (groundY - 190));
         const dropX = 270 + i * 26;
-        ctx.fillStyle = 'rgba(125, 211, 252, 0.75)';
+        ctx.fillStyle = 'rgba(125, 211, 252, 0.82)';
         ctx.beginPath();
-        ctx.ellipse(dropX, dropY, 4, 12, 0, 0, Math.PI * 2);
+        ctx.ellipse(dropX, dropY, 4, 13, 0, 0, Math.PI * 2);
         ctx.fill();
       }
-      // Red plastic bucket on floor
-      ctx.fillStyle = '#b91c1c';
+      // 3D Red plastic bucket with rim highlight
+      const bGrad = ctx.createLinearGradient(255, groundY - 75, 355, groundY);
+      bGrad.addColorStop(0, '#ef4444');
+      bGrad.addColorStop(0.45, '#b91c1c');
+      bGrad.addColorStop(1, '#7f1d1d');
+      ctx.fillStyle = bGrad;
       ctx.beginPath();
       ctx.moveTo(255, groundY - 75);
       ctx.lineTo(355, groundY - 75);
@@ -107,46 +128,38 @@ export function drawBackgroundScene(
       ctx.lineTo(270, groundY);
       ctx.closePath();
       ctx.fill();
-
-      // Golden Tombstone monument inside the leaky office!
-      const goldGrad = ctx.createLinearGradient(680, groundY - 380, 860, groundY);
-      goldGrad.addColorStop(0, '#fef08a');
-      goldGrad.addColorStop(0.5, '#eab308');
-      goldGrad.addColorStop(1, '#854d0e');
-      ctx.fillStyle = goldGrad;
+      ctx.fillStyle = '#fca5a5';
       ctx.beginPath();
-      ctx.roundRect(685, groundY - 350, 175, 310, [88, 88, 8, 8]);
+      ctx.ellipse(305, groundY - 75, 50, 9, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#422006';
-      ctx.fillRect(665, groundY - 45, 215, 45);
+
+      // 3D Extruded Golden Tombstone Monument
+      draw3DExtrudedBox(ctx, 685, groundY - 310, 175, 270, 26, -16, '#eab308', '#854d0e', '#fef08a');
+      ctx.fillStyle = create3DSphereGradient(ctx, 772, groundY - 310, 88, '#eab308', -0.35, -0.4, 48, -32);
+      ctx.beginPath();
+      ctx.arc(772, groundY - 310, 88, Math.PI, 0);
+      ctx.fill();
+      draw3DExtrudedBox(ctx, 665, groundY - 45, 215, 45, 26, -12, '#422006', '#271203', '#713f12');
       ctx.fillStyle = '#fef9c3';
-      ctx.font = '700 22px "Plus Jakarta Sans", sans-serif';
+      ctx.font = '800 22px "Plus Jakarta Sans", sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('NISAN EMAS', 772, groundY - 220);
       ctx.fillText('PEJABAT', 772, groundY - 190);
-      // Sparkle on golden tombstone
       const sp = 0.5 + 0.5 * Math.sin(globalTime * 4);
       drawStarSparkle(ctx, 835, groundY - 310, 18 * sp + 6, '#ffffff');
       break;
     }
 
     case 'meja_lpj': {
-      drawIndoorRoom(ctx, w, h, groundY, '#1f1d24', '#2a2632', '#17151c');
-      // Tall stacks of LPJ folders
-      drawPaperStack(ctx, 110, groundY - 260, 150, 260);
-      drawPaperStack(ctx, 820, groundY - 310, 160, 310);
-      // Desk in middle
-      ctx.fillStyle = '#452715';
-      ctx.fillRect(260, groundY - 190, 560, 28);
-      ctx.fillStyle = '#331c0f';
-      ctx.fillRect(290, groundY - 162, 32, 162);
-      ctx.fillRect(758, groundY - 162, 32, 162);
-      // Board behind
-      ctx.fillStyle = '#18181b';
-      ctx.strokeStyle = '#52525b';
-      ctx.lineWidth = 6;
-      ctx.fillRect(220, 310, 640, 260);
-      ctx.strokeRect(220, 310, 640, 260);
+      draw3DPerspectiveRoom(ctx, w, h, groundY, '#191720', '#2a2632', '#17151c');
+      drawPaperStack(ctx, 125, groundY - 260, 145, 260);
+      drawPaperStack(ctx, 805, groundY - 310, 155, 310);
+      // 3D Extruded Mahogany Desk
+      draw3DExtrudedBox(ctx, 260, groundY - 190, 560, 28, 18, -18, '#6b3e21', '#3b2110', '#8b542f');
+      draw3DExtrudedBox(ctx, 290, groundY - 162, 32, 162, 12, 0, '#452715', '#29170c');
+      draw3DExtrudedBox(ctx, 758, groundY - 162, 32, 162, 12, 0, '#452715', '#29170c');
+      // 3D Recessed Wall Board
+      draw3DExtrudedBox(ctx, 220, 310, 640, 260, 14, -10, '#18181b', '#09090b', '#27272a', '#52525b');
       ctx.fillStyle = '#facc15';
       ctx.font = '700 32px "Plus Jakarta Sans", sans-serif';
       ctx.textAlign = 'center';
@@ -158,19 +171,26 @@ export function drawBackgroundScene(
     }
 
     case 'ruang_server': {
-      drawIndoorRoom(ctx, w, h, groundY, '#0d111a', '#161d2b', '#090c12');
-      // Server racks with blinking red/green LEDs
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#090c14',
+        '#141c2b',
+        '#090d16',
+        'rgba(56, 189, 248, 0.12)',
+        'rgba(56, 189, 248, 0.2)'
+      );
+      // 3D Extruded Server Racks with side depth
       for (let r = 0; r < 2; r++) {
-        const rx = r === 0 ? 85 : 755;
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(rx, 360, 240, groundY - 360);
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(rx, 360, 240, groundY - 360);
+        const rx = r === 0 ? 110 : 735;
+        const depthX = r === 0 ? 28 : -28;
+        draw3DExtrudedBox(ctx, rx, 360, 235, groundY - 360, depthX, -18, '#1e293b', '#0f172a', '#334155', '#334155');
         for (let row = 0; row < 10; row++) {
           const ry = 390 + row * 72;
           ctx.fillStyle = '#0f172a';
-          ctx.fillRect(rx + 20, ry, 200, 48);
+          ctx.fillRect(rx + 20, ry, 195, 48);
           const blink = Math.sin(globalTime * 9 + row * 1.7 + r * 3) > 0;
           ctx.fillStyle = blink ? '#ef4444' : '#f59e0b';
           ctx.beginPath();
@@ -178,12 +198,8 @@ export function drawBackgroundScene(
           ctx.fill();
         }
       }
-      // Giant central monitor SI-GENTAYANGAN
-      ctx.fillStyle = '#020617';
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 10;
-      ctx.fillRect(280, 390, 520, 330);
-      ctx.strokeRect(280, 390, 520, 330);
+      // 3D Giant Central Monitor
+      draw3DExtrudedBox(ctx, 280, 390, 520, 330, 16, -12, '#020617', '#0f172a', '#334155', '#475569');
       const glitch = Math.sin(globalTime * 16) > 0.7;
       ctx.fillStyle = glitch ? '#7f1d1d' : '#1e1b4b';
       ctx.fillRect(298, 408, 484, 294);
@@ -199,110 +215,128 @@ export function drawBackgroundScene(
 
     case 'kuburan_berkabut':
     case 'jalan_berlubang': {
-      // Night cemetery sky
       const sky = ctx.createLinearGradient(0, 0, 0, groundY);
-      sky.addColorStop(0, '#070b14');
-      sky.addColorStop(0.55, '#131d31');
-      sky.addColorStop(1, '#1e293b');
+      sky.addColorStop(0, '#050811');
+      sky.addColorStop(0.5, '#131d31');
+      sky.addColorStop(1, '#24324a');
       ctx.fillStyle = sky;
       ctx.fillRect(0, 0, w, groundY);
 
-      // Full moon
-      ctx.fillStyle = 'rgba(254, 249, 195, 0.14)';
+      // Volumetric 3D Full Moon with atmospheric halo
+      const moonHalo = ctx.createRadialGradient(820, 290, 40, 820, 290, 240);
+      moonHalo.addColorStop(0, 'rgba(254, 249, 195, 0.28)');
+      moonHalo.addColorStop(0.5, 'rgba(186, 230, 253, 0.12)');
+      moonHalo.addColorStop(1, 'rgba(186, 230, 253, 0)');
+      ctx.fillStyle = moonHalo;
       ctx.beginPath();
-      ctx.arc(820, 290, 145, 0, Math.PI * 2);
+      ctx.arc(820, 290, 240, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#fef3c7';
+
+      ctx.fillStyle = create3DSphereGradient(ctx, 820, 290, 90, '#fef3c7', -0.25, -0.3, 25, -20);
       ctx.beginPath();
       ctx.arc(820, 290, 88, 0, Math.PI * 2);
       ctx.fill();
 
-      // Distant silhouettes of banyan tree & hills
-      ctx.fillStyle = '#0f172a';
+      // Parallax layered distant silhouettes
+      ctx.fillStyle = '#0c1322';
       ctx.beginPath();
       ctx.moveTo(0, groundY);
-      ctx.quadraticCurveTo(280, groundY - 240, 560, groundY - 130);
-      ctx.quadraticCurveTo(840, groundY - 260, w, groundY - 90);
+      ctx.quadraticCurveTo(280, groundY - 260, 560, groundY - 140);
+      ctx.quadraticCurveTo(840, groundY - 280, w, groundY - 100);
       ctx.lineTo(w, groundY);
       ctx.closePath();
       ctx.fill();
 
-      // Tombstones in background
+      ctx.fillStyle = '#121b2d';
+      ctx.beginPath();
+      ctx.moveTo(0, groundY);
+      ctx.quadraticCurveTo(220, groundY - 120, 480, groundY - 75);
+      ctx.quadraticCurveTo(780, groundY - 150, w, groundY - 50);
+      ctx.lineTo(w, groundY);
+      ctx.closePath();
+      ctx.fill();
+
+      // 3D Extruded Tombstones
       drawTombstone(ctx, 130, groundY, 0.9);
       drawTombstone(ctx, 310, groundY, 0.72);
       drawTombstone(ctx, 790, groundY, 0.85);
       drawTombstone(ctx, 940, groundY, 1.0);
 
-      // Ground
-      ctx.fillStyle = '#141a24';
+      // 3D Perspective Cemetery Ground
+      const gGrad = ctx.createLinearGradient(0, groundY, 0, h);
+      gGrad.addColorStop(0, '#1e293b');
+      gGrad.addColorStop(0.2, '#141a24');
+      gGrad.addColorStop(1, '#090c12');
+      ctx.fillStyle = gGrad;
       ctx.fillRect(0, groundY, w, h - groundY);
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(0, groundY, w, 14);
 
       if (bgId === 'jalan_berlubang') {
-        // Puddle / pothole on path
-        ctx.fillStyle = '#090d14';
+        const holeGrad = ctx.createRadialGradient(540, groundY + 60, 20, 540, groundY + 60, 185);
+        holeGrad.addColorStop(0, '#020408');
+        holeGrad.addColorStop(0.85, '#0f172a');
+        holeGrad.addColorStop(1, '#334155');
+        ctx.fillStyle = holeGrad;
         ctx.beginPath();
         ctx.ellipse(540, groundY + 60, 180, 36, 0, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = 4;
-        ctx.stroke();
       }
 
-      // Drifting low fog
+      // Volumetric drifting ground mist
       for (let i = 0; i < 4; i++) {
         const fx = ((globalTime * 35 + i * 320) % (w + 400)) - 200;
-        const grad = ctx.createRadialGradient(fx, groundY - 20, 20, fx, groundY - 20, 260);
-        grad.addColorStop(0, 'rgba(203, 213, 225, 0.14)');
+        const grad = ctx.createRadialGradient(fx, groundY - 20, 20, fx, groundY - 20, 280);
+        grad.addColorStop(0, 'rgba(203, 213, 225, 0.18)');
         grad.addColorStop(1, 'rgba(203, 213, 225, 0)');
         ctx.fillStyle = grad;
-        ctx.fillRect(0, groundY - 220, w, 300);
+        ctx.fillRect(0, groundY - 240, w, 320);
       }
       break;
     }
 
     case 'gerbang_syuting': {
-      const sky = ctx.createLinearGradient(0, 0, 0, groundY);
-      sky.addColorStop(0, '#18181b');
-      sky.addColorStop(1, '#27272a');
-      ctx.fillStyle = sky;
-      ctx.fillRect(0, 0, w, groundY);
-      // Spotlight beams
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#141418',
+        '#27272a',
+        '#141417',
+        'rgba(255,255,255,0.05)',
+        'rgba(250,204,21,0.18)'
+      );
+      // Volumetric Spotlight Cones
       ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.fillStyle = '#fef08a';
-      ctx.beginPath();
-      ctx.moveTo(140, 0);
-      ctx.lineTo(440, groundY);
-      ctx.lineTo(660, groundY);
-      ctx.lineTo(280, 0);
-      ctx.closePath();
-      ctx.fill();
-      ctx.beginPath();
-      ctx.moveTo(920, 0);
-      ctx.lineTo(460, groundY);
-      ctx.lineTo(720, groundY);
-      ctx.lineTo(800, 0);
-      ctx.closePath();
-      ctx.fill();
+      ctx.globalAlpha = 0.2;
+      for (const beam of [
+        [140, 280, 440, 660],
+        [920, 800, 460, 720],
+      ]) {
+        const bg = ctx.createLinearGradient(beam[0], 0, (beam[2] + beam[3]) / 2, groundY);
+        bg.addColorStop(0, '#fef08a');
+        bg.addColorStop(1, 'rgba(254, 240, 138, 0)');
+        ctx.fillStyle = bg;
+        ctx.beginPath();
+        ctx.moveTo(beam[0], 0);
+        ctx.lineTo(beam[2], groundY);
+        ctx.lineTo(beam[3], groundY);
+        ctx.lineTo(beam[1], 0);
+        ctx.closePath();
+        ctx.fill();
+      }
       ctx.restore();
 
-      // Banner backdrop
-      ctx.fillStyle = '#7f1d1d';
-      ctx.fillRect(140, 340, 800, 170);
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 6;
-      ctx.strokeRect(140, 340, 800, 170);
+      draw3DExtrudedBox(ctx, 140, 340, 800, 170, 14, -10, '#7f1d1d', '#450a0a', '#b91c1c', '#fbbf24');
       ctx.fillStyle = '#fef9c3';
       ctx.font = '800 36px "Plus Jakarta Sans", sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('KELURAHAN INDIS — SIAP SIDAK ✔', 540, 440);
 
-      // Floor + Red Carpet
-      ctx.fillStyle = '#18181b';
-      ctx.fillRect(0, groundY, w, h - groundY);
-      ctx.fillStyle = '#991b1b';
+      // Perspective 3D Red Carpet with golden trim
+      const carpGrad = ctx.createLinearGradient(0, groundY, 0, h);
+      carpGrad.addColorStop(0, '#991b1b');
+      carpGrad.addColorStop(1, '#450a0a');
+      ctx.fillStyle = carpGrad;
       ctx.beginPath();
       ctx.moveTo(320, groundY);
       ctx.lineTo(760, groundY);
@@ -310,23 +344,38 @@ export function drawBackgroundScene(
       ctx.lineTo(140, h);
       ctx.closePath();
       ctx.fill();
+      ctx.strokeStyle = '#facc15';
+      ctx.lineWidth = 4;
+      ctx.stroke();
       break;
     }
 
     case 'ruang_sidang_mkk': {
-      drawIndoorRoom(ctx, w, h, groundY, '#231414', '#331c1c', '#180d0d');
-      // Tall marble pillars
-      for (const px of [90, 910]) {
-        ctx.fillStyle = '#44403c';
-        ctx.fillRect(px, 160, 80, groundY - 160);
-        ctx.fillStyle = '#78716c';
-        ctx.fillRect(px + 12, 160, 14, groundY - 160);
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#1e1010',
+        '#331c1c',
+        '#180d0d',
+        'rgba(251,191,36,0.08)',
+        'rgba(251,191,36,0.16)'
+      );
+      // 3D Cylindrical Marble Pillars
+      for (const px of [125, 875]) {
+        const pGrad = ctx.createLinearGradient(px, 0, px + 80, 0);
+        pGrad.addColorStop(0, '#78716c');
+        pGrad.addColorStop(0.3, '#a8a29e');
+        pGrad.addColorStop(0.7, '#44403c');
+        pGrad.addColorStop(1, '#292524');
+        ctx.fillStyle = pGrad;
+        ctx.fillRect(px, 140, 80, groundY - 140);
       }
-      // Emblem & Judge bench
-      ctx.fillStyle = '#78350f';
-      ctx.fillRect(260, groundY - 220, 560, 220);
+      // 3D Extruded Judge Bench
+      draw3DExtrudedBox(ctx, 260, groundY - 220, 560, 220, 22, -16, '#78350f', '#451a03', '#b45309');
       ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(260, groundY - 228, 560, 14);
+      ctx.fillRect(260, groundY - 228, 560, 12);
       ctx.fillStyle = '#fde047';
       ctx.font = '800 30px "Plus Jakarta Sans", sans-serif';
       ctx.textAlign = 'center';
@@ -335,34 +384,38 @@ export function drawBackgroundScene(
     }
 
     case 'vila_puncak': {
-      drawIndoorRoom(ctx, w, h, groundY, '#1f2421', '#29302c', '#141715');
-      // Panoramic mountain mist window
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(140, 240, 800, 460);
-      ctx.strokeStyle = '#78350f';
-      ctx.lineWidth = 14;
-      ctx.strokeRect(140, 240, 800, 460);
-      // Chandelier
-      ctx.fillStyle = '#fbbf24';
+      draw3DPerspectiveRoom(ctx, w, h, groundY, '#181c1a', '#29302c', '#141715');
+      draw3DExtrudedBox(ctx, 150, 240, 780, 450, 14, -10, '#0f172a', '#020617', '#1e293b', '#78350f');
+      // 3D Glowing Chandelier
+      const chand = ctx.createRadialGradient(540, 170, 8, 540, 170, 180);
+      chand.addColorStop(0, 'rgba(254, 240, 138, 0.75)');
+      chand.addColorStop(1, 'rgba(254, 240, 138, 0)');
+      ctx.fillStyle = chand;
+      ctx.beginPath();
+      ctx.arc(540, 170, 180, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = create3DSphereGradient(ctx, 540, 170, 36, '#fbbf24', -0.3, -0.3, 45, -35);
       ctx.beginPath();
       ctx.arc(540, 170, 36, 0, Math.PI * 2);
       ctx.fill();
-      // Buffet table
-      ctx.fillStyle = '#f5f5f4';
-      ctx.fillRect(180, groundY - 150, 720, 150);
+      // 3D Buffet Table
+      draw3DExtrudedBox(ctx, 180, groundY - 150, 720, 150, 20, -14, '#e7e5e4', '#a8a29e', '#fafaf9');
       ctx.fillStyle = '#d97706';
-      ctx.fillRect(180, groundY - 160, 720, 22);
+      ctx.fillRect(180, groundY - 160, 720, 20);
       break;
     }
 
     case 'bukit_tambang': {
       const sky = ctx.createLinearGradient(0, 0, 0, groundY);
       sky.addColorStop(0, '#291d16');
-      sky.addColorStop(1, '#573b26');
+      sky.addColorStop(1, '#68452c');
       ctx.fillStyle = sky;
       ctx.fillRect(0, 0, w, groundY);
-      // Terraced scarred mining hill
-      ctx.fillStyle = '#452b1a';
+
+      const hillGrad = ctx.createLinearGradient(0, groundY - 380, w, groundY);
+      hillGrad.addColorStop(0, '#5e3b24');
+      hillGrad.addColorStop(1, '#2b1a10');
+      ctx.fillStyle = hillGrad;
       ctx.beginPath();
       ctx.moveTo(0, groundY - 380);
       ctx.lineTo(360, groundY - 260);
@@ -372,40 +425,67 @@ export function drawBackgroundScene(
       ctx.lineTo(0, groundY);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = '#291a10';
+
+      const fg = ctx.createLinearGradient(0, groundY, 0, h);
+      fg.addColorStop(0, '#3b2416');
+      fg.addColorStop(1, '#1c1009');
+      ctx.fillStyle = fg;
       ctx.fillRect(0, groundY, w, h - groundY);
       break;
     }
 
     case 'gudang_buzzer': {
-      drawIndoorRoom(ctx, w, h, groundY, '#09090f', '#131320', '#06060b');
-      // Wall of glowing phone racks
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#07070d',
+        '#131320',
+        '#06060b',
+        'rgba(14, 165, 233, 0.14)',
+        'rgba(14, 165, 233, 0.2)'
+      );
       for (let col = 0; col < 5; col++) {
         for (let row = 0; row < 7; row++) {
-          const px = 110 + col * 185;
+          const px = 120 + col * 175;
           const py = 260 + row * 105;
           const active = Math.sin(globalTime * 12 + col * 3 + row) > -0.3;
-          ctx.fillStyle = active ? '#0ea5e9' : '#1e293b';
-          ctx.beginPath();
-          ctx.roundRect(px, py, 120, 74, 10);
-          ctx.fill();
+          draw3DExtrudedBox(
+            ctx,
+            px,
+            py,
+            115,
+            70,
+            8,
+            -6,
+            active ? '#0ea5e9' : '#1e293b',
+            '#0f172a',
+            active ? '#7dd3fc' : '#334155'
+          );
         }
       }
       break;
     }
 
     case 'istana_mewah': {
-      drawIndoorRoom(ctx, w, h, groundY, '#261c0f', '#3d2c14', '#1c1409');
-      // Golden arches & chandelier
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 10;
-      ctx.strokeRect(120, 220, 840, groundY - 240);
-      ctx.fillStyle = '#fef08a';
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#20170b',
+        '#3d2c14',
+        '#1c1409',
+        'rgba(251, 191, 36, 0.14)',
+        'rgba(251, 191, 36, 0.25)'
+      );
+      draw3DExtrudedBox(ctx, 130, 220, 820, groundY - 240, 14, -10, '#2b1e0e', '#171007', '#78350f', '#fbbf24');
+      ctx.fillStyle = create3DSphereGradient(ctx, 540, 150, 46, '#fef08a', -0.3, -0.3, 45, -35);
       ctx.beginPath();
       ctx.arc(540, 150, 44, 0, Math.PI * 2);
       ctx.fill();
-      // Gold coin pile
-      ctx.fillStyle = '#eab308';
+      ctx.fillStyle = create3DSphereGradient(ctx, 880, groundY, 125, '#eab308', -0.35, -0.4, 48, -42);
       ctx.beginPath();
       ctx.arc(880, groundY, 120, Math.PI, 0);
       ctx.fill();
@@ -413,13 +493,18 @@ export function drawBackgroundScene(
     }
 
     case 'bilik_suara': {
-      drawIndoorRoom(ctx, w, h, groundY, '#121824', '#1b2436', '#0d111a');
-      // Digital OCR tally board
-      ctx.fillStyle = '#020617';
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 6;
-      ctx.fillRect(150, 280, 780, 320);
-      ctx.strokeRect(150, 280, 780, 320);
+      draw3DPerspectiveRoom(
+        ctx,
+        w,
+        h,
+        groundY,
+        '#0d121c',
+        '#1b2436',
+        '#0d111a',
+        'rgba(56, 189, 248, 0.12)',
+        'rgba(56, 189, 248, 0.2)'
+      );
+      draw3DExtrudedBox(ctx, 150, 280, 780, 320, 16, -12, '#020617', '#0f172a', '#1e293b', '#38bdf8');
       ctx.fillStyle = '#38bdf8';
       ctx.font = '700 30px "JetBrains Mono", monospace';
       ctx.textAlign = 'center';
@@ -428,45 +513,19 @@ export function drawBackgroundScene(
       ctx.fillStyle = sceneTime > 4 ? '#f87171' : '#34d399';
       ctx.font = '800 96px "JetBrains Mono", monospace';
       ctx.fillText(bigNum, 540, 495);
-      // Ballot box
-      ctx.fillStyle = '#e2e8f0';
-      ctx.fillRect(450, groundY - 170, 180, 170);
+
+      // 3D Extruded Ballot Box
+      draw3DExtrudedBox(ctx, 450, groundY - 170, 180, 170, 26, -18, '#e2e8f0', '#94a3b8', '#f8fafc', '#475569');
       ctx.fillStyle = '#0f172a';
-      ctx.fillRect(495, groundY - 155, 90, 14);
+      ctx.fillRect(505, groundY - 182, 90, 8);
       break;
     }
 
     default: {
-      drawIndoorRoom(ctx, w, h, groundY, '#18181b', '#27272a', '#09090b');
+      draw3DPerspectiveRoom(ctx, w, h, groundY, '#141418', '#27272a', '#09090b');
       break;
     }
   }
-}
-
-function drawIndoorRoom(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  groundY: number,
-  topColor: string,
-  wallColor: string,
-  floorColor: string
-) {
-  const wallGrad = ctx.createLinearGradient(0, 0, 0, groundY);
-  wallGrad.addColorStop(0, topColor);
-  wallGrad.addColorStop(1, wallColor);
-  ctx.fillStyle = wallGrad;
-  ctx.fillRect(0, 0, w, groundY);
-
-  // Baseboard trim
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillRect(0, groundY - 18, w, 18);
-
-  // Floor
-  ctx.fillStyle = floorColor;
-  ctx.fillRect(0, groundY, w, h - groundY);
-  ctx.fillStyle = 'rgba(255,255,255,0.04)';
-  ctx.fillRect(0, groundY, w, 4);
 }
 
 function drawPaperStack(
@@ -480,10 +539,18 @@ function drawPaperStack(
   for (let i = 0; i < sheets; i++) {
     const sy = y + i * 14;
     const jitter = ((i * 17) % 7) - 3;
-    ctx.fillStyle = i % 3 === 0 ? '#e2e8f0' : '#cbd5e1';
-    ctx.fillRect(x + jitter, sy, width, 11);
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillRect(x + jitter, sy + 11, width, 3);
+    draw3DExtrudedBox(
+      ctx,
+      x + jitter,
+      sy,
+      width,
+      11,
+      10,
+      -4,
+      i % 3 === 0 ? '#e2e8f0' : '#cbd5e1',
+      '#94a3b8',
+      '#f8fafc'
+    );
   }
 }
 
@@ -496,12 +563,21 @@ function drawTombstone(
   ctx.save();
   ctx.translate(x, groundY);
   ctx.scale(scale, scale);
-  ctx.fillStyle = '#334155';
+  // 3D Side depth
+  ctx.fillStyle = '#1e293b';
+  ctx.beginPath();
+  ctx.roundRect(-33, -146, 90, 140, [45, 45, 0, 0]);
+  ctx.fill();
+  // Front stone face with volumetric gradient
+  const stGrad = ctx.createLinearGradient(-45, -140, 45, 0);
+  stGrad.addColorStop(0, shadeHex('#475569', 22));
+  stGrad.addColorStop(0.5, '#334155');
+  stGrad.addColorStop(1, '#1e293b');
+  ctx.fillStyle = stGrad;
   ctx.beginPath();
   ctx.roundRect(-45, -140, 90, 140, [45, 45, 0, 0]);
   ctx.fill();
-  ctx.fillStyle = '#1e293b';
-  ctx.fillRect(-55, -18, 110, 18);
+  draw3DExtrudedBox(ctx, -55, -18, 110, 18, 12, -6, '#1e293b', '#0f172a', '#475569');
   ctx.restore();
 }
 
@@ -529,6 +605,42 @@ function drawStarSparkle(
   ctx.restore();
 }
 
+/**
+ * Renders foreground 3D floating bokeh dust motes & volumetric atmosphere depth
+ */
+export function drawVolumetricStageDepth(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  globalTime: number,
+  parallaxX = 0
+) {
+  ctx.save();
+  // Soft top-left volumetric studio key-light beam
+  const beam = ctx.createRadialGradient(w * 0.18, h * 0.08, 40, w * 0.45, h * 0.42, h * 0.65);
+  beam.addColorStop(0, 'rgba(254, 243, 199, 0.14)');
+  beam.addColorStop(0.45, 'rgba(254, 243, 199, 0.04)');
+  beam.addColorStop(1, 'rgba(254, 243, 199, 0)');
+  ctx.fillStyle = beam;
+  ctx.fillRect(0, 0, w, h);
+
+  // Foreground out-of-focus bokeh dust motes moving with 1.35x camera parallax
+  for (let i = 0; i < 16; i++) {
+    const seed = i * 89.4;
+    const x = ((seed * 37 + parallaxX * 1.35 + Math.sin(globalTime * 0.6 + i) * 32) % w + w) % w;
+    const y = ((seed * 53 - globalTime * (18 + (i % 4) * 6)) % h + h) % h;
+    const r = 7 + (i % 5) * 3.5;
+    const bokeh = ctx.createRadialGradient(x, y, 1, x, y, r);
+    bokeh.addColorStop(0, 'rgba(255, 251, 235, 0.22)');
+    bokeh.addColorStop(1, 'rgba(255, 251, 235, 0)');
+    ctx.fillStyle = bokeh;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 export function drawWeatherParticles(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -552,7 +664,6 @@ export function drawWeatherParticles(
       ctx.lineTo(x - 14, y + 48);
       ctx.stroke();
 
-      // Ground splash ring
       if (y > groundY - 25 && y < groundY + 45) {
         ctx.strokeStyle = 'rgba(186, 230, 253, 0.32)';
         ctx.beginPath();
@@ -634,14 +745,12 @@ export function drawLightingOverlay(
   } else if (lighting === 'storm') {
     ctx.fillStyle = 'rgba(15, 23, 42, 0.28)';
     ctx.fillRect(0, 0, w, h);
-    // Occasional lightning flash
     if (Math.sin(globalTime * 1.7) > 0.985) {
       ctx.fillStyle = 'rgba(241, 245, 249, 0.35)';
       ctx.fillRect(0, 0, w, h);
     }
   }
 
-  // Subtle cinematic vignette
   const vig = ctx.createRadialGradient(w / 2, h / 2, w * 0.32, w / 2, h / 2, h * 0.65);
   vig.addColorStop(0, 'rgba(0,0,0,0)');
   vig.addColorStop(1, 'rgba(0,0,0,0.48)');

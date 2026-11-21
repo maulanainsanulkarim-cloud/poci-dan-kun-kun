@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { studioAudio } from '../engine/audioEngine';
 import { renderStudioFrame } from '../engine/sceneCompositor';
+import { exportStudioVideo } from '../engine/videoExporter';
 import { AudioSlotData, CharacterProfile, EpisodeConfig } from '../types/studio';
 
 interface CanvasStageProps {
@@ -55,12 +56,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   const [vuLevel, setVuLevel] = useState(0);
   const [sfxMuted, setSfxMuted] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportStageLabel, setExportStageLabel] = useState('Menyiapkan render...');
   const [exportScope, setExportScope] = useState<'full60' | 'scene15'>('full60');
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
-  const [exportedMimeLabel, setExportedMimeLabel] = useState('video/webm');
+  const [exportedMimeLabel, setExportedMimeLabel] = useState('MP4');
+  const [exportedExtension, setExportedExtension] = useState<'mp4' | 'webm'>('mp4');
+  const [exportedSizeMb, setExportedSizeMb] = useState<string>('');
   const [exportError, setExportError] = useState<string | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const exportTimerRef = useRef<number | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   const activeSceneIdx = Math.min(3, Math.floor(currentTime / 15)) as 0 | 1 | 2 | 3;
   const activeScene = episode.scenes[activeSceneIdx];
@@ -148,154 +151,60 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   };
 
   const handleStartExport = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
     setExportError(null);
     if (exportedVideoUrl) {
       URL.revokeObjectURL(exportedVideoUrl);
       setExportedVideoUrl(null);
     }
 
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    setIsExporting(true);
+    setExportProgress(0);
+    setExportStageLabel('Menyiapkan audio master 48kHz...');
+    studioAudio.stopDubbing();
+
     try {
-      studioAudio.ensureContext();
-      const audioDest = studioAudio.getMediaStreamDestination();
-      const canvasStream = canvas.captureStream(30);
-      const combinedStream = new MediaStream([
-        ...canvasStream.getVideoTracks(),
-        ...audioDest.stream.getAudioTracks(),
-      ]);
+      const result = await exportStudioVideo({
+        episode,
+        characters,
+        audioSlots,
+        exportScope,
+        activeSceneIdx,
+        showWatermark,
+        cameraAutoZoom,
+        sfxMuted,
+        signal: controller.signal,
+        onProgress: (pct, label) => {
+          setExportProgress(pct);
+          setExportStageLabel(label);
+        },
+      });
 
-      const preferredTypes = [
-        'video/mp4;codecs=avc1,mp4a.40.2',
-        'video/mp4',
-        'video/webm;codecs=vp9,opus',
-        'video/webm;codecs=vp8,opus',
-        'video/webm',
-      ];
-      const chosenType =
-        preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
-
-      const recorder = new MediaRecorder(
-        combinedStream,
-        chosenType
-          ? { mimeType: chosenType, videoBitsPerSecond: 6_000_000 }
-          : { videoBitsPerSecond: 6_000_000 }
-      );
-
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-
-      recorder.onstop = () => {
-        const mime = recorder.mimeType || chosenType || 'video/webm';
-        const blob = new Blob(chunks, { type: mime });
-        const url = URL.createObjectURL(blob);
-        setExportedVideoUrl(url);
-        setExportedMimeLabel(mime.includes('mp4') ? 'MP4 (H.264)' : 'WebM (VP9/Opus)');
-        setIsExporting(false);
-        setExportProgress(100);
-        studioAudio.stopDubbing();
-      };
-
-      mediaRecorderRef.current = recorder;
-      setIsExporting(true);
-      setExportProgress(0);
-
-      const startSec = exportScope === 'scene15' ? activeSceneIdx * 15 : 0;
-      const totalSec = exportScope === 'scene15' ? 15 : 60;
-      const endSec = startSec + totalSec;
-
-      recorder.start(250);
-      const startAudioClock = studioAudio.getAudioTime();
-      let lastScheduledScene = -1;
-      let lastPopupKey = '';
-      let lastExpLineId = '';
-
-      const renderLoop = () => {
-        const elapsed = Math.max(0, studioAudio.getAudioTime() - startAudioClock);
-        const simTime = startSec + elapsed;
-        if (simTime >= endSec) {
-          if (recorder.state === 'recording') {
-            recorder.stop();
-          }
-          return;
-        }
-
-        const scIdx = Math.min(3, Math.floor(simTime / 15)) as 0 | 1 | 2 | 3;
-        const scTime = simTime - scIdx * 15;
-        const sc = episode.scenes[scIdx];
-
-        // Play dubbing buffer per scene boundary honoring dubbingOffsetSec
-        if (scIdx !== lastScheduledScene) {
-          lastScheduledScene = scIdx;
-          const slotBuf = audioSlots[scIdx]?.buffer;
-          const dubOffset = sc.dubbingOffsetSec ?? 0;
-          if (slotBuf) {
-            studioAudio.playDubbingSlot(slotBuf, scTime, dubOffset);
-          } else {
-            studioAudio.stopDubbing();
-          }
-          if (!sfxMuted) studioAudio.triggerSfx('whoosh');
-        }
-
-        // Trigger dialogue action SFX cleanly during export
-        const activeLine = sc.dialogues.find(
-          (d) => scTime >= d.startSec && scTime <= d.endSec
-        );
-        if (!sfxMuted && activeLine && lastExpLineId !== activeLine.id) {
-          lastExpLineId = activeLine.id;
-          const lower = activeLine.text.toLowerCase();
-          if (activeLine.actionCue === 'hop') studioAudio.triggerSfx('boing');
-          else if (activeLine.actionCue === 'laugh') studioAudio.triggerSfx('giggle');
-          else if (activeLine.actionCue === 'gavel_slam') studioAudio.triggerSfx('gavel');
-          else if (lower.includes('cekrek') || lower.includes('foto'))
-            studioAudio.triggerSfx('camera');
-          else if (lower.includes('saldo') || lower.includes('koin'))
-            studioAudio.triggerSfx('coin');
-          else if (lower.includes('error') || lower.includes('down'))
-            studioAudio.triggerSfx('error');
-        }
-
-        // Trigger scene popup SFX cues cleanly during render
-        const popStart = sc.popup.startSec ?? 1.8;
-        if (!sfxMuted && Math.abs(scTime - popStart) < 0.06 && lastPopupKey !== `exp_pop_${scIdx}`) {
-          lastPopupKey = `exp_pop_${scIdx}`;
-          studioAudio.triggerSfx(sc.popup.color === 'stamp' ? 'stamp' : 'pop');
-        }
-
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          renderStudioFrame(ctx, {
-            episode,
-            characters,
-            audioSlots,
-            globalTime: simTime,
-            showWatermark,
-            cameraAutoZoom,
-          });
-        }
-        onSeek(simTime);
-        setExportProgress(Math.min(99, Math.round((elapsed / totalSec) * 100)));
-        exportTimerRef.current = requestAnimationFrame(renderLoop);
-      };
-
-      exportTimerRef.current = requestAnimationFrame(renderLoop);
+      const url = URL.createObjectURL(result.blob);
+      setExportedVideoUrl(url);
+      setExportedMimeLabel(result.formatLabel);
+      setExportedExtension(result.extension);
+      setExportedSizeMb((result.blob.size / (1024 * 1024)).toFixed(2));
+      setExportProgress(100);
+      setIsExporting(false);
     } catch (err: unknown) {
       setIsExporting(false);
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return;
+      }
       setExportError(
         err instanceof Error
           ? err.message
-          : 'Browser tidak mendukung perekaman kanvas MediaRecorder.'
+          : 'Gagal mengekspor video di browser ini.'
       );
+    } finally {
+      exportAbortRef.current = null;
     }
   };
 
   const handleCancelExport = () => {
-    if (exportTimerRef.current) cancelAnimationFrame(exportTimerRef.current);
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
+    exportAbortRef.current?.abort();
     studioAudio.stopDubbing();
     setIsExporting(false);
   };
@@ -493,9 +402,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
             <div className="space-y-3 text-sm text-zinc-300">
               <p className="text-xs text-zinc-400 leading-relaxed">
-                Merekam kanvas 1080×1920 @ 30 FPS bersama dubbing MP3 dan SFX Web Audio API secara sinkron melalui{' '}
-                <code className="font-mono text-amber-400">captureStream(30)</code> +{' '}
-                <code className="font-mono text-amber-400">MediaRecorder</code>.
+                Merender frame 3D 1080×1920 tepat 30 FPS bersama dubbing MP3 & SFX 48kHz secara deterministik dengan muxer{' '}
+                <code className="font-mono text-amber-400">MP4 Fast-Start</code> agar mulus diputar & di-seek di semua perangkat.
               </p>
 
               <div className="grid grid-cols-2 gap-2">
@@ -530,9 +438,9 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
             {isExporting && (
               <div className="space-y-2 p-4 rounded-lg border border-zinc-800 bg-zinc-950">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-amber-400 font-medium">Merekam kanvas & audio real-time...</span>
-                  <span className="font-mono text-zinc-200">{exportProgress}%</span>
+                <div className="flex items-center justify-between text-xs gap-2">
+                  <span className="text-amber-400 font-medium truncate">{exportStageLabel}</span>
+                  <span className="font-mono text-zinc-200 tabular-nums">{exportProgress}%</span>
                 </div>
                 <div className="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
                   <div
@@ -541,7 +449,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                   />
                 </div>
                 <p className="text-[11px] text-zinc-400">
-                  Jangan tutup tab ini selama proses perekaman berlangsung.
+                  Render deterministik anti-stuck — menjaga setiap frame & audio sinkron.
                 </p>
               </div>
             )}
@@ -554,24 +462,31 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
 
             {exportedVideoUrl && !isExporting && (
               <div className="space-y-3 p-3 rounded-lg border border-emerald-500/30 bg-emerald-950/20">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-emerald-300 font-semibold">
-                    Render selesai ({exportedMimeLabel})
-                  </span>
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="min-w-0">
+                    <div className="text-emerald-300 font-semibold truncate">
+                      Render selesai ({exportedMimeLabel})
+                    </div>
+                    {exportedSizeMb && (
+                      <div className="text-[11px] font-mono text-zinc-400">
+                        Ukuran: {exportedSizeMb} MB · 1080×1920 · 30 FPS
+                      </div>
+                    )}
+                  </div>
                   <a
                     href={exportedVideoUrl}
-                    download={`indis-ep${episode.episodeNumber}-${exportScope}.${
-                      exportedMimeLabel.includes('MP4') ? 'mp4' : 'webm'
-                    }`}
-                    className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold flex items-center gap-1.5"
+                    download={`indis-ep${episode.episodeNumber}-${exportScope}.${exportedExtension}`}
+                    className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold flex items-center gap-1.5 shrink-0"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Download Video
+                    Download .{exportedExtension.toUpperCase()}
                   </a>
                 </div>
                 <video
                   src={exportedVideoUrl}
                   controls
+                  playsInline
+                  preload="auto"
                   className="w-full max-h-64 rounded-lg bg-black border border-zinc-800"
                 />
               </div>

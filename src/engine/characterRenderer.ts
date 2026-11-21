@@ -1,8 +1,16 @@
 import { CharacterProfile, VisemeType } from '../types/studio';
 import { getCachedImage } from './backgrounds';
 import { EvaluatedMotionPose, solveTwoBoneIK } from './ikPhysics';
+import {
+  create3DCylinderGradient,
+  create3DSphereGradient,
+  draw3DExtrudedBox,
+  draw3DGroundShadow,
+  draw3DLimbSegment,
+  shadeHex,
+} from './volumetric3D';
 
-const INK = '#1e1b18';
+const INK = '#161311';
 
 export function drawArticulatedCharacter(
   ctx: CanvasRenderingContext2D,
@@ -13,16 +21,15 @@ export function drawArticulatedCharacter(
   scale = 1,
   globalTime = 0
 ) {
-  // 1. Ground Contact Shadow (stays planted on groundY, scales with hopHeight)
-  const heightRatio = Math.max(0.35, 1 - pose.hopHeight / 260);
-  const shadowRx = 74 * scale * heightRatio * (pose.plankAngle > 0.4 ? 1.8 : 1);
-  const shadowRy = 18 * scale * heightRatio;
-  ctx.save();
-  ctx.fillStyle = `rgba(0, 0, 0, ${(0.48 * heightRatio).toFixed(2)})`;
-  ctx.beginPath();
-  ctx.ellipse(anchorX + pose.offsetX, groundY + 6, shadowRx, shadowRy, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  // 1. Dual-Layer 3D Ground Contact AO + Angled Cast Shadow
+  draw3DGroundShadow(
+    ctx,
+    anchorX + pose.offsetX,
+    groundY,
+    scale,
+    pose.hopHeight,
+    pose.plankAngle > 0.4
+  );
 
   // 2. Character Root Transform (anchored at feet on groundY - hopHeight)
   ctx.save();
@@ -100,6 +107,13 @@ function drawCustomRigWithImage(
   const dw = img.width * scale;
   const dh = img.height * scale;
   ctx.drawImage(img, -dw / 2, -125 + (235 - dh) / 2, dw, dh);
+  // Subtle 3D rim overlay
+  const rimGrad = ctx.createLinearGradient(-86, -125, 86, 110);
+  rimGrad.addColorStop(0, 'rgba(255,255,255,0.22)');
+  rimGrad.addColorStop(0.5, 'rgba(255,255,255,0)');
+  rimGrad.addColorStop(1, 'rgba(0,0,0,0.34)');
+  ctx.fillStyle = rimGrad;
+  ctx.fillRect(-86, -125, 172, 235);
   ctx.restore();
 
   ctx.strokeStyle = profile.accentColor;
@@ -136,42 +150,39 @@ function drawTwoBoneLegs(
   const ikL = solveTwoBoneIK(-18, hipY, footLX, footPlantY - 8, len1, len2, 1);
   const ikR = solveTwoBoneIK(18, hipY, footRX, footPlantY - 8, len1, len2, -1);
 
+  const w = furryCalf ? 24 : 18;
   for (const ik of [
     { rootX: -18, ...ikL, dir: -1 },
     { rootX: 18, ...ikR, dir: 1 },
   ]) {
-    // Ink outline pass
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = furryCalf ? 30 : 24;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(ik.rootX, hipY);
-    ctx.lineTo(ik.jointX, ik.jointY);
-    ctx.lineTo(ik.endX, ik.endY);
-    ctx.stroke();
+    // 3D cylindrical thigh & shin segments
+    draw3DLimbSegment(ctx, ik.rootX, hipY, ik.jointX, ik.jointY, w + 2, pantColor, INK);
+    draw3DLimbSegment(ctx, ik.jointX, ik.jointY, ik.endX, ik.endY, w - 1, pantColor, INK);
 
-    // Fill pass
-    ctx.strokeStyle = pantColor;
-    ctx.lineWidth = furryCalf ? 24 : 18;
+    // 3D spherical knee highlight
+    ctx.fillStyle = create3DSphereGradient(ctx, ik.jointX, ik.jointY, w * 0.48, pantColor, -0.3, -0.3, 28, -28);
     ctx.beginPath();
-    ctx.moveTo(ik.rootX, hipY);
-    ctx.lineTo(ik.jointX, ik.jointY);
-    ctx.lineTo(ik.endX, ik.endY);
-    ctx.stroke();
+    ctx.arc(ik.jointX, ik.jointY, w * 0.42, 0, Math.PI * 2);
+    ctx.fill();
 
-    // Foot / Shoe planted flat on ground
-    ctx.fillStyle = footColor;
+    // 3D sculpted foot / shoe planted flat on ground
+    const fx = barefoot ? ik.endX + ik.dir * 5 : ik.endX + 4;
+    const fy = barefoot ? ik.endY + 5 : ik.endY + 6;
+    const frx = barefoot ? 19 : 21;
+    const fry = barefoot ? 9 : 11;
+    ctx.fillStyle = create3DSphereGradient(ctx, fx, fy, frx, footColor, -0.35, -0.45, 36, -42);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 3;
     ctx.beginPath();
-    if (barefoot) {
-      ctx.ellipse(ik.endX + ik.dir * 5, ik.endY + 5, 19, 8.5, 0, 0, Math.PI * 2);
-    } else {
-      ctx.ellipse(ik.endX + 4, ik.endY + 6, 20, 10, 0, 0, Math.PI * 2);
-    }
+    ctx.ellipse(fx, fy, frx, fry, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+
+    // Shoe/foot top specular shine
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.28)';
+    ctx.beginPath();
+    ctx.ellipse(fx - 4, fy - 4, frx * 0.45, fry * 0.3, -0.15, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -198,28 +209,12 @@ function drawTwoBoneArms(
     { rootX: -42, ik: ikL, isRight: false },
     { rootX: 42, ik: ikR, isRight: true },
   ]) {
-    // Ink outline
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = limbWidth + 5;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(side.rootX, shoulderY);
-    ctx.lineTo(side.ik.jointX, side.ik.jointY);
-    ctx.lineTo(side.ik.endX, side.ik.endY);
-    ctx.stroke();
+    // 3D cylindrical upper arm & forearm
+    draw3DLimbSegment(ctx, side.rootX, shoulderY, side.ik.jointX, side.ik.jointY, limbWidth + 1.5, sleeveColor, INK);
+    draw3DLimbSegment(ctx, side.ik.jointX, side.ik.jointY, side.ik.endX, side.ik.endY, limbWidth - 1, sleeveColor, INK);
 
-    // Inner limb fill
-    ctx.strokeStyle = sleeveColor;
-    ctx.lineWidth = limbWidth;
-    ctx.beginPath();
-    ctx.moveTo(side.rootX, shoulderY);
-    ctx.lineTo(side.ik.jointX, side.ik.jointY);
-    ctx.lineTo(side.ik.endX, side.ik.endY);
-    ctx.stroke();
-
-    // Hand
-    ctx.fillStyle = handColor;
+    // 3D spherical hand
+    ctx.fillStyle = create3DSphereGradient(ctx, side.ik.endX, side.ik.endY, 12.5, handColor, -0.35, -0.4, 38, -38);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2.8;
     ctx.beginPath();
@@ -227,19 +222,12 @@ function drawTwoBoneArms(
     ctx.fill();
     ctx.stroke();
 
-    // Held Props matched to reference sheets!
+    // 3D Held Props matched to reference sheets
     if (!side.isRight && profile.hasClipboard) {
-      // Kun-Kun's left hand holds clipboard: JADWAL RAPAT & KOPI
       ctx.save();
       ctx.translate(side.ik.endX, side.ik.endY);
       ctx.rotate(-0.15 + pose.armGestureL * 0.2);
-      ctx.fillStyle = '#78563a';
-      ctx.strokeStyle = INK;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.roundRect(-22, -30, 44, 58, 5);
-      ctx.fill();
-      ctx.stroke();
+      draw3DExtrudedBox(ctx, -22, -30, 44, 58, 5, -4, '#78563a', '#4a3320', '#966c49', INK);
       ctx.fillStyle = '#f8fafc';
       ctx.fillRect(-17, -23, 34, 45);
       ctx.fillStyle = '#94a3b8';
@@ -254,17 +242,11 @@ function drawTwoBoneArms(
     }
 
     if (!side.isRight && profile.hasCoinBag) {
-      // Tuyul's left hand holds EDC MACHINE
+      // Tuyul's 3D beveled EDC MACHINE
       ctx.save();
       ctx.translate(side.ik.endX, side.ik.endY);
       ctx.rotate(-0.12 + pose.armGestureL * 0.2);
-      ctx.fillStyle = '#334155';
-      ctx.strokeStyle = INK;
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      ctx.roundRect(-15, -26, 30, 48, 6);
-      ctx.fill();
-      ctx.stroke();
+      draw3DExtrudedBox(ctx, -15, -26, 30, 48, 6, -4, '#334155', '#1e293b', '#475569', INK);
       ctx.fillStyle = '#86efac';
       ctx.fillRect(-10, -20, 20, 14);
       ctx.fillStyle = '#cbd5e1';
@@ -281,22 +263,22 @@ function drawTwoBoneArms(
         ctx.save();
         ctx.translate(side.ik.endX, side.ik.endY);
         ctx.rotate(pose.armGestureR);
-        ctx.fillStyle = '#78350f';
+        ctx.fillStyle = create3DCylinderGradient(ctx, -5, -52, 5, 4, '#78350f', 30, -35);
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2.5;
         ctx.fillRect(-5, -52, 10, 56);
         ctx.strokeRect(-5, -52, 10, 56);
-        ctx.fillStyle = '#b45309';
-        ctx.beginPath();
-        ctx.roundRect(-22, -62, 44, 22, 6);
-        ctx.fill();
-        ctx.stroke();
+        draw3DExtrudedBox(ctx, -22, -62, 44, 22, 6, -5, '#b45309', '#78350f', '#d97706', INK);
         ctx.restore();
       } else if (profile.hasClipboard) {
-        // Kun-Kun's right hand holds KOPI SABAR takeaway cup
+        // 3D cylindrical KOPI SABAR takeaway cup
         ctx.save();
         ctx.translate(side.ik.endX, side.ik.endY - 4);
-        ctx.fillStyle = '#a67c52';
+        const cupGrad = ctx.createLinearGradient(-13, 0, 13, 0);
+        cupGrad.addColorStop(0, '#c2986d');
+        cupGrad.addColorStop(0.35, '#a67c52');
+        cupGrad.addColorStop(1, '#5e4228');
+        ctx.fillStyle = cupGrad;
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
@@ -307,10 +289,11 @@ function drawTwoBoneArms(
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
+
         ctx.fillStyle = '#e7dfd5';
         ctx.fillRect(-12, -5, 24, 15);
         ctx.strokeRect(-12, -5, 24, 15);
-        ctx.fillStyle = '#f8fafc';
+        ctx.fillStyle = create3DCylinderGradient(ctx, -15, -22, 15, -15, '#f8fafc', 15, -22);
         ctx.beginPath();
         ctx.roundRect(-15, -22, 30, 7, 3);
         ctx.fill();
@@ -322,38 +305,42 @@ function drawTwoBoneArms(
         ctx.fillText('SABAR', 0, 8);
         ctx.restore();
       } else if (profile.hasCigar) {
-        // Pak Gendu's green cigar with burning red ember
+        // 3D cigar with glowing ember bloom
         ctx.save();
         ctx.translate(side.ik.endX, side.ik.endY);
         ctx.rotate(-0.35);
-        ctx.fillStyle = '#4d7c0f';
+        ctx.fillStyle = create3DCylinderGradient(ctx, 0, -5, 0, 5, '#4d7c0f', 28, -35);
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.roundRect(0, -5, 36, 10, 4);
         ctx.fill();
         ctx.stroke();
-        ctx.fillStyle = '#dc2626';
+        // Glowing ember
+        const emb = ctx.createRadialGradient(36, 0, 1, 36, 0, 14);
+        emb.addColorStop(0, '#fef08a');
+        emb.addColorStop(0.4, '#ef4444');
+        emb.addColorStop(1, 'rgba(239,68,68,0)');
+        ctx.fillStyle = emb;
         ctx.beginPath();
-        ctx.arc(36, 0, 5, 0, Math.PI * 2);
+        ctx.arc(36, 0, 14, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       } else if (profile.hasCoinBag) {
-        // Tuyul's right hand holds '$' Sack overflowing with gold coins
+        // 3D volumetric '$' Sack overflowing with metallic 3D gold coins
         ctx.save();
         ctx.translate(side.ik.endX, side.ik.endY + 12);
-        ctx.fillStyle = '#b49a78';
+        ctx.fillStyle = create3DSphereGradient(ctx, 0, 14, 26, '#b49a78', -0.35, -0.4, 34, -40);
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.arc(0, 14, 24, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
-        // Gold coins sticking out top
-        ctx.fillStyle = '#facc15';
         for (const cx of [-8, 0, 8]) {
+          ctx.fillStyle = create3DSphereGradient(ctx, cx, -9, 7, '#facc15', -0.35, -0.4, 50, -35);
           ctx.beginPath();
-          ctx.arc(cx, -9, 6, 0, Math.PI * 2);
+          ctx.arc(cx, -9, 6.2, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
         }
@@ -368,7 +355,7 @@ function drawTwoBoneArms(
 }
 
 /**
- * POCI — Matched directly to poci_4de02c5c.jpg puppet sheet
+ * POCI — 3D Volumetric Shroud, Sculpted Face & Satchel
  */
 function drawPocongRig(
   ctx: CanvasRenderingContext2D,
@@ -379,26 +366,19 @@ function drawPocongRig(
   ctx.save();
   ctx.rotate(pose.bodyLean);
 
-  // Peeking left/right pale-blue arm from side of shroud (matching sheet!)
+  // Peeking pale-blue 3D arm
   ctx.save();
   const armWave = Math.sin(pose.armGestureR) * 14;
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 20;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(46, -155);
-  ctx.quadraticCurveTo(64, -120, 62 + armWave * 0.4, -84);
-  ctx.stroke();
-  ctx.strokeStyle = profile.skinColor;
-  ctx.lineWidth = 14;
-  ctx.stroke();
+  draw3DLimbSegment(ctx, 44, -155, 62 + armWave * 0.4, -86, 15, profile.skinColor, INK);
   ctx.restore();
 
-  // Main rounded-capsule white shroud (#F2EFE9 with #D8D2C5 cel-shadow)
-  const bodyGrad = ctx.createLinearGradient(-58, -300, 58, 0);
-  bodyGrad.addColorStop(0, profile.primaryColor);
-  bodyGrad.addColorStop(0.75, profile.primaryColor);
-  bodyGrad.addColorStop(1, profile.secondaryColor);
+  // Main 3D cylindrical capsule white shroud
+  const bodyGrad = ctx.createLinearGradient(-58, -280, 58, -40);
+  bodyGrad.addColorStop(0, shadeHex(profile.primaryColor, 18));
+  bodyGrad.addColorStop(0.28, '#ffffff');
+  bodyGrad.addColorStop(0.62, profile.primaryColor);
+  bodyGrad.addColorStop(0.88, profile.secondaryColor);
+  bodyGrad.addColorStop(1, shadeHex(profile.secondaryColor, -22));
 
   ctx.fillStyle = bodyGrad;
   ctx.strokeStyle = INK;
@@ -408,11 +388,21 @@ function drawPocongRig(
   ctx.fill();
   ctx.stroke();
 
-  // Flared cloth Top-Knot ('KEPAK') swaying with spring physics
+  // Subtle 3D cloth fold creases
+  ctx.strokeStyle = 'rgba(120, 113, 108, 0.25)';
+  ctx.lineWidth = 2.2;
+  for (const fy of [-130, -82, -45]) {
+    ctx.beginPath();
+    ctx.moveTo(-42, fy);
+    ctx.quadraticCurveTo(0, fy + 10, 44, fy - 4);
+    ctx.stroke();
+  }
+
+  // Flared cloth Top-Knot ('KEPAK') with 3D shading
   ctx.save();
   ctx.translate(0, -288);
   ctx.rotate(pose.hairAngle1 * 1.35 + pose.headTilt);
-  ctx.fillStyle = profile.primaryColor;
+  ctx.fillStyle = create3DCylinderGradient(ctx, -24, -48, 24, 0, profile.primaryColor, 20, -30);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
@@ -424,15 +414,15 @@ function drawPocongRig(
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
-  // Top rope tie
-  ctx.fillStyle = '#d4c5b0';
+
+  ctx.fillStyle = create3DCylinderGradient(ctx, -16, -8, 16, 2, '#d4c5b0', 22, -28);
   ctx.beginPath();
   ctx.roundRect(-16, -8, 32, 10, 5);
   ctx.fill();
   ctx.stroke();
   ctx.restore();
 
-  // Crossed messenger bag strap + worn brown satchel holding RED 'REVISI' folder
+  // Crossed messenger bag strap
   ctx.strokeStyle = INK;
   ctx.lineWidth = 12;
   ctx.beginPath();
@@ -443,7 +433,7 @@ function drawPocongRig(
   ctx.lineWidth = 7;
   ctx.stroke();
 
-  // Blue lanyard strap + slanted ID Card ('PEGAWAI HONORER POCI')
+  // Blue lanyard strap + glossy 3D Laminated ID Card
   ctx.strokeStyle = '#2563eb';
   ctx.lineWidth = 5;
   ctx.beginPath();
@@ -468,73 +458,81 @@ function drawPocongRig(
   ctx.fillStyle = '#1e293b';
   ctx.font = '800 5.5px sans-serif';
   ctx.fillText('POCI', 2, 24);
+  // Laminated specular diagonal sheen
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.beginPath();
+  ctx.moveTo(-16, 2);
+  ctx.lineTo(6, 2);
+  ctx.lineTo(-16, 36);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 
-  // Brown messenger satchel + bright red REVISI folder on left hip
+  // 3D Brown messenger satchel + bright red extruded REVISI folder
   ctx.save();
   ctx.translate(-34, -104);
   ctx.rotate(0.08 + pose.scarfAngle * 0.25);
-  // Red REVISI folder sticking out of bag
-  ctx.fillStyle = '#dc2626';
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 2.8;
-  ctx.beginPath();
-  ctx.roundRect(-24, -46, 46, 42, 3);
-  ctx.fill();
-  ctx.stroke();
+  draw3DExtrudedBox(ctx, -24, -46, 46, 42, 5, -4, '#dc2626', '#991b1b', '#f87171', INK);
   ctx.fillStyle = '#ffffff';
   ctx.font = '800 10px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText('REVISI', -1, -24);
 
-  // Leather bag body & flap
-  ctx.fillStyle = '#6e553d';
+  ctx.fillStyle = create3DCylinderGradient(ctx, -28, -14, 28, 34, '#6e553d', 24, -36);
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.8;
   ctx.beginPath();
   ctx.roundRect(-28, -14, 56, 48, 8);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = '#57422e';
+  ctx.fillStyle = create3DCylinderGradient(ctx, -28, -14, 28, 8, '#57422e', 20, -32);
   ctx.beginPath();
   ctx.roundRect(-28, -14, 56, 22, 6);
   ctx.fill();
   ctx.stroke();
   ctx.restore();
 
-  // Neck rope tie with bow knot right below chin
-  ctx.fillStyle = '#d4c5b0';
+  // 3D Neck rope tie
+  ctx.fillStyle = create3DCylinderGradient(ctx, -58, -172, 58, -161, '#d4c5b0', 25, -30);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.roundRect(-58, -172, 116, 11, 5);
   ctx.fill();
   ctx.stroke();
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -166, 8, '#d4c5b0', -0.35, -0.35, 30, -35);
   ctx.beginPath();
-  ctx.arc(0, -166, 7, 0, Math.PI * 2);
+  ctx.arc(0, -166, 7.5, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
-  // Hood opening & 2.5D Round Pale-Blue Face
+  // 3D Recessed Hood Opening + Spherical 2.5D Pale-Blue Face
   ctx.save();
   ctx.translate(pose.headYaw * 12, -225 + pose.headBobY * 0.55);
   ctx.rotate(pose.headTilt);
 
-  // Inner hood shadow rim
-  ctx.fillStyle = '#3f3b36';
+  // Recessed dark hood cavity
+  const hoodDepth = ctx.createRadialGradient(0, 0, 24, 0, 0, 48);
+  hoodDepth.addColorStop(0, '#181614');
+  hoodDepth.addColorStop(0.85, '#3f3b36');
+  hoodDepth.addColorStop(1, '#57534e');
+  ctx.fillStyle = hoodDepth;
   ctx.beginPath();
-  ctx.ellipse(0, 0, 44, 46, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 0, 45, 47, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Pale icy-blue face (#CBE2EE)
-  ctx.fillStyle = profile.skinColor;
+  // 3D Spherical Pale-Blue Face
+  const faceW = 39 * Math.cos(pose.headYaw * 0.3);
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, 2, 42, profile.skinColor, -0.35, -0.38, 36, -38);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.ellipse(0, 2, 39 * Math.cos(pose.headYaw * 0.3), 42, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, 2, faceW, 42, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
   const fx = pose.headYaw * 11;
-  // Wispy messy black forehead hair strands
+  // Messy forehead strands
   ctx.strokeStyle = profile.hairColor;
   ctx.lineWidth = 3.2;
   ctx.lineCap = 'round';
@@ -547,7 +545,6 @@ function drawPocongRig(
   ctx.quadraticCurveTo(22 + fx, -18, 14 + fx, -12);
   ctx.stroke();
 
-  // Heavy dark under-eye bags (tired overtime!) or X-X dizzy eyes if planked!
   if (pose.plankAngle > 0.25) {
     ctx.strokeStyle = INK;
     ctx.lineWidth = 3.5;
@@ -564,11 +561,16 @@ function drawPocongRig(
     drawVisemeMouth(ctx, 'o', 0.6, '#334155', 0.9);
     ctx.restore();
   } else {
-    ctx.fillStyle = 'rgba(100, 116, 139, 0.45)';
-    ctx.beginPath();
-    ctx.ellipse(-14 + fx, 1, 11, 7.5, 0, 0, Math.PI * 2);
-    ctx.ellipse(14 + fx, 1, 11, 7.5, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // 3D recessed dark eye bags
+    for (const bx of [-14 + fx, 14 + fx]) {
+      const bagGrad = ctx.createRadialGradient(bx, 1, 2, bx, 1, 12);
+      bagGrad.addColorStop(0, 'rgba(71, 85, 105, 0.55)');
+      bagGrad.addColorStop(1, 'rgba(71, 85, 105, 0)');
+      ctx.fillStyle = bagGrad;
+      ctx.beginPath();
+      ctx.ellipse(bx, 1, 12, 8, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
     drawFaceFeatures(ctx, pose, profile, fx, -4, 0.94, true);
   }
 
@@ -577,7 +579,7 @@ function drawPocongRig(
 }
 
 /**
- * KUN-KUN — Matched directly to kun_kun_de0d64c1.jpg puppet sheet
+ * KUN-KUN — 3D Volumetric Hair, Pleated Skirt & Glass Sheen
  */
 function drawKuntiRig(
   ctx: CanvasRenderingContext2D,
@@ -588,10 +590,10 @@ function drawKuntiRig(
   ctx.save();
   ctx.rotate(pose.bodyLean);
 
-  // Back layer of jet-black hair (Secondary Motion spring chain)
+  // Back layer of jet-black hair with 3D sheen gradient
   ctx.save();
   ctx.translate(0, -258 + pose.headBobY * 0.5);
-  ctx.fillStyle = profile.hairColor;
+  ctx.fillStyle = create3DCylinderGradient(ctx, -60, 0, 60, 120, profile.hairColor, 26, -32);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
@@ -607,18 +609,17 @@ function drawKuntiRig(
   ctx.stroke();
   ctx.restore();
 
-  // Flowing ghost-tail skirt + fitted long-sleeve blouse (no feet!)
+  // Flowing 3D pleated ghost-tail skirt + blouse
   const hemWave = Math.sin(globalTime * 3.2) * 9 + pose.scarfAngle * 22;
-  ctx.fillStyle = profile.primaryColor;
+  ctx.fillStyle = create3DCylinderGradient(ctx, -68, -148, 68, 0, profile.primaryColor, 22, -32);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
 
-  // Flared pleated skirt + ghostly wisp tail at bottom right
   ctx.beginPath();
   ctx.moveTo(-30, -148);
   ctx.quadraticCurveTo(-56, -78, -68 + hemWave, -18);
   ctx.quadraticCurveTo(-36, -6, -12 + hemWave * 0.6, -20);
-  ctx.quadraticCurveTo(8, -10, 12 + hemWave * 0.8, 8); // ghostly wisp curl!
+  ctx.quadraticCurveTo(8, -10, 12 + hemWave * 0.8, 8);
   ctx.quadraticCurveTo(28, -4, 30 + hemWave * 0.7, -22);
   ctx.quadraticCurveTo(52, -8, 68 + hemWave, -18);
   ctx.quadraticCurveTo(54, -78, 30, -148);
@@ -626,13 +627,27 @@ function drawKuntiRig(
   ctx.fill();
   ctx.stroke();
 
-  // Fitted blouse torso
+  // 3D vertical skirt fold shadows
+  ctx.strokeStyle = 'rgba(71, 85, 105, 0.25)';
+  ctx.lineWidth = 3;
+  for (const fx of [-22, 0, 22]) {
+    ctx.beginPath();
+    ctx.moveTo(fx * 0.6, -145);
+    ctx.quadraticCurveTo(fx, -85, fx * 1.4 + hemWave * 0.5, -24);
+    ctx.stroke();
+  }
+
+  // 3D Sculpted fitted blouse torso
+  ctx.fillStyle = create3DCylinderGradient(ctx, -34, -220, 34, -144, profile.primaryColor, 24, -30);
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 3.5;
   ctx.beginPath();
   ctx.roundRect(-34, -220, 68, 76, 16);
   ctx.fill();
   ctx.stroke();
-  // V-neck collar detail
-  ctx.fillStyle = profile.skinColor;
+
+  // V-neck collar detail with 3D neck shadow
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -210, 18, profile.skinColor, -0.3, -0.3, 25, -35);
   ctx.beginPath();
   ctx.moveTo(-14, -220);
   ctx.lineTo(0, -196);
@@ -641,7 +656,6 @@ function drawKuntiRig(
   ctx.fill();
   ctx.stroke();
 
-  // IK Arms holding Clipboard (left) & Kopi Sabar (right)
   drawTwoBoneArms(ctx, pose, -204, profile.primaryColor, profile.skinColor, 50, 46, profile, 14);
 
   // Head + 2.5D Turn
@@ -649,8 +663,8 @@ function drawKuntiRig(
   ctx.translate(pose.headYaw * 15, -264 + pose.headBobY * 0.58);
   ctx.rotate(pose.headTilt);
 
-  // Hair crown
-  ctx.fillStyle = profile.hairColor;
+  // 3D Hair dome
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -8, 50, profile.hairColor, -0.35, -0.4, 34, -38);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.2;
   ctx.beginPath();
@@ -658,8 +672,8 @@ function drawKuntiRig(
   ctx.fill();
   ctx.stroke();
 
-  // Pale blue-gray face (#C8D6E5)
-  ctx.fillStyle = profile.skinColor;
+  // 3D Pale blue-gray face
+  ctx.fillStyle = create3DSphereGradient(ctx, pose.headYaw * 6, 4, 44, profile.skinColor, -0.35, -0.38, 34, -36);
   ctx.beginPath();
   ctx.ellipse(pose.headYaw * 6, 4, 41 * Math.cos(pose.headYaw * 0.35), 45, 0, 0, Math.PI * 2);
   ctx.fill();
@@ -668,10 +682,10 @@ function drawKuntiRig(
   const fx = pose.headYaw * 13;
   drawFaceFeatures(ctx, pose, profile, fx, 0, 0.98, false);
 
-  // Sleek Cat-Eye Glasses
+  // Sleek Cat-Eye Glasses with 3D specular lens glare
   ctx.strokeStyle = '#1e293b';
   ctx.lineWidth = 3.5;
-  ctx.fillStyle = 'rgba(255,255,255,0.16)';
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
   ctx.beginPath();
   ctx.moveTo(-32 + fx, -10);
   ctx.lineTo(-4 + fx, -4);
@@ -690,8 +704,8 @@ function drawKuntiRig(
   ctx.fill();
   ctx.stroke();
 
-  // Asymmetrical long front bangs sweeping over left eye (matching sheet!)
-  ctx.fillStyle = profile.hairColor;
+  // Anisotropic hair crown highlight arc + Asymmetrical bangs
+  ctx.fillStyle = create3DSphereGradient(ctx, -10, -28, 48, profile.hairColor, -0.35, -0.4, 36, -32);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3;
   ctx.beginPath();
@@ -705,12 +719,20 @@ function drawKuntiRig(
   ctx.fill();
   ctx.stroke();
 
+  // Glossy anime/3D hair sheen arc
+  ctx.strokeStyle = 'rgba(226, 232, 240, 0.36)';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(0, -14, 38, -Math.PI * 0.82, -Math.PI * 0.25);
+  ctx.stroke();
+
   ctx.restore();
   ctx.restore();
 }
 
 /**
- * PAK GENDU — Matched directly to gendu_5b968460.jpg puppet sheet
+ * PAK GENDU — 3D Volumetric Pot-Belly, Batik Vest & Glowing Red Eyes
  */
 function drawGenderuwoRig(
   ctx: CanvasRenderingContext2D,
@@ -719,7 +741,6 @@ function drawGenderuwoRig(
   globalTime: number
 ) {
   const hipY = -102;
-  // Dark shorts/pants + furry bare feet planted with 2-Bone IK
   drawTwoBoneLegs(ctx, pose, hipY, '#231f20', profile.primaryColor, 54, 52, true, true);
 
   ctx.save();
@@ -727,8 +748,8 @@ function drawGenderuwoRig(
   ctx.rotate(pose.bodyLean);
   ctx.scale(pose.breathScale, 1 + (pose.breathScale - 1) * 0.5);
 
-  // Big furry oval pot-belly body (#4A3B31)
-  ctx.fillStyle = profile.primaryColor;
+  // 3D Big furry oval pot-belly torso
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -84, 96, profile.primaryColor, -0.32, -0.36, 30, -45);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -737,17 +758,17 @@ function drawGenderuwoRig(
   ctx.stroke();
 
   // Dark waist brief/shorts
-  ctx.fillStyle = '#231f20';
+  ctx.fillStyle = create3DCylinderGradient(ctx, -62, -10, 62, 14, '#231f20', 22, -35);
   ctx.beginPath();
   ctx.ellipse(0, -10, 62, 24, 0, 0, Math.PI);
   ctx.fill();
   ctx.stroke();
 
-  // Open-front Brown & Gold Batik Shirt (leaving furry chest/belly exposed in center!)
-  ctx.fillStyle = profile.secondaryColor;
+  // Open-front 3D Brown & Gold Batik Shirt panels
+  const batikGradL = create3DCylinderGradient(ctx, -82, -162, -18, -24, profile.secondaryColor, 26, -34);
+  ctx.fillStyle = batikGradL;
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
-  // Left shirt panel
   ctx.beginPath();
   ctx.moveTo(-18, -162);
   ctx.lineTo(-76, -138);
@@ -757,7 +778,9 @@ function drawGenderuwoRig(
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
-  // Right shirt panel
+
+  const batikGradR = create3DCylinderGradient(ctx, 18, -162, 82, -24, profile.secondaryColor, 20, -42);
+  ctx.fillStyle = batikGradR;
   ctx.beginPath();
   ctx.moveTo(18, -162);
   ctx.lineTo(76, -138);
@@ -768,7 +791,6 @@ function drawGenderuwoRig(
   ctx.fill();
   ctx.stroke();
 
-  // Classic gold Batik motifs on shirt panels
   ctx.strokeStyle = '#d4a76a';
   ctx.lineWidth = 2.2;
   for (const bx of [-52, -40, 40, 52]) {
@@ -779,8 +801,8 @@ function drawGenderuwoRig(
     }
   }
 
-  // Golden horn-like official pin on chest
-  ctx.fillStyle = profile.accentColor;
+  // 3D Metallic Golden Horn Pin
+  ctx.fillStyle = create3DSphereGradient(ctx, 38, -112, 11, profile.accentColor, -0.35, -0.4, 55, -35);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -788,27 +810,30 @@ function drawGenderuwoRig(
   ctx.fill();
   ctx.stroke();
 
-  // Furry 2-Bone IK arms holding green cigar
   drawTwoBoneArms(ctx, pose, -135, profile.primaryColor, profile.primaryColor, 58, 52, profile, 22);
 
-  // Pale green cigar smoke wisps
+  // Volumetric 3D green cigar smoke wisps
   if (profile.hasCigar) {
     for (let s = 0; s < 3; s++) {
       const sy = -140 - ((globalTime * 45 + s * 26) % 85);
       const sx = 98 + Math.sin(globalTime * 3 + s) * 14;
-      ctx.fillStyle = `rgba(167, 215, 184, ${(0.52 - s * 0.12).toFixed(2)})`;
+      const sr = 12 + s * 6;
+      const sg = ctx.createRadialGradient(sx - 3, sy - 3, 2, sx, sy, sr);
+      sg.addColorStop(0, `rgba(187, 247, 208, ${(0.58 - s * 0.14).toFixed(2)})`);
+      sg.addColorStop(1, 'rgba(167, 215, 184, 0)');
+      ctx.fillStyle = sg;
       ctx.beginPath();
-      ctx.arc(sx, sy, 10 + s * 5, 0, Math.PI * 2);
+      ctx.arc(sx, sy, sr, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // Furry Head with glowing red eyes & fangs
+  // 3D Furry Head
   ctx.save();
   ctx.translate(pose.headYaw * 16, -186 + pose.headBobY * 0.5);
   ctx.rotate(pose.headTilt);
 
-  ctx.fillStyle = profile.primaryColor;
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 56, profile.primaryColor, -0.35, -0.4, 30, -44);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 4;
   ctx.beginPath();
@@ -816,7 +841,6 @@ function drawGenderuwoRig(
   ctx.fill();
   ctx.stroke();
 
-  // Furry cheek/crown tufts
   ctx.beginPath();
   ctx.moveTo(-54, -8);
   ctx.lineTo(-68, -26);
@@ -828,15 +852,12 @@ function drawGenderuwoRig(
   ctx.stroke();
 
   const fx = pose.headYaw * 14;
-  // Glowing red eyes
   drawGlowingEyes(ctx, pose, fx, -10, '#ef4444', true);
-  // Broad flat nose
-  ctx.fillStyle = '#2c221e';
+  ctx.fillStyle = create3DSphereGradient(ctx, fx, 8, 10, '#2c221e', -0.3, -0.4, 35, -40);
   ctx.beginPath();
   ctx.ellipse(fx, 8, 10, 6, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Mouth with fangs!
   ctx.save();
   ctx.translate(fx, 26);
   drawVisemeMouth(ctx, pose.viseme, pose.mouthOpen, '#1c1917', 1.12, true);
@@ -847,7 +868,7 @@ function drawGenderuwoRig(
 }
 
 /**
- * TUYUL & GUS TUYUL MUDA — Matched directly to tuyul_de6ed773.jpg puppet sheet
+ * TUYUL & GUS TUYUL MUDA — 3D Glossy Bald Head, Peach Subsurface Skin & Props
  */
 function drawTuyulRig(
   ctx: CanvasRenderingContext2D,
@@ -856,7 +877,6 @@ function drawTuyulRig(
   _globalTime: number
 ) {
   const hipY = -88;
-  // Warm peach bare legs & feet (2-Bone IK!)
   drawTwoBoneLegs(ctx, pose, hipY, profile.skinColor, profile.skinColor, 46, 46, true, false);
 
   ctx.save();
@@ -864,8 +884,8 @@ function drawTuyulRig(
   ctx.rotate(pose.bodyLean);
   ctx.scale(pose.breathScale, 1 + (pose.breathScale - 1) * 0.5);
 
-  // Bare-chested peach torso (or dark suit if Gus Tuyul Muda)
-  ctx.fillStyle = profile.primaryColor;
+  // 3D sculpted peach torso (or suit for Gus Tuyul Muda)
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -52, 56, profile.primaryColor, -0.35, -0.4, 34, -38);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
@@ -873,14 +893,13 @@ function drawTuyulRig(
   ctx.fill();
   ctx.stroke();
 
-  // White boxer shorts (#F8FAFC)
-  ctx.fillStyle = profile.secondaryColor;
+  // 3D shaded White Boxer Shorts
+  ctx.fillStyle = create3DCylinderGradient(ctx, -36, -28, 36, 6, profile.secondaryColor, 20, -32);
   ctx.beginPath();
   ctx.roundRect(-36, -28, 72, 34, 8);
   ctx.fill();
   ctx.stroke();
 
-  // Subtle belly button for bare-chested Tuyul
   if (!profile.hasTie) {
     ctx.fillStyle = '#b4785b';
     ctx.beginPath();
@@ -888,12 +907,11 @@ function drawTuyulRig(
     ctx.fill();
   }
 
-  // Tie if Gus Tuyul Muda
   if (profile.hasTie) {
     ctx.save();
     ctx.translate(0, -82);
     ctx.rotate(pose.scarfAngle * 0.7);
-    ctx.fillStyle = '#dc2626';
+    ctx.fillStyle = create3DCylinderGradient(ctx, -11, 0, 11, 62, '#dc2626', 30, -35);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -908,40 +926,42 @@ function drawTuyulRig(
     ctx.restore();
   }
 
-  // IK Arms holding EDC machine + Coin Sack
   drawTwoBoneArms(ctx, pose, -82, profile.primaryColor, profile.skinColor, 40, 38, profile, 14);
 
-  // Big shiny bald round head (#E3AF95) with ears
+  // 3D Big Shiny Bald Spherical Head
   ctx.save();
   ctx.translate(pose.headYaw * 14, -142 + pose.headBobY * 0.55);
   ctx.rotate(pose.headTilt);
 
-  // Ears
-  ctx.fillStyle = profile.skinColor;
-  ctx.strokeStyle = INK;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.ellipse(-49, 4, 10, 14, -0.2, 0, Math.PI * 2);
-  ctx.ellipse(49, 4, 10, 14, 0.2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
+  // 3D Ears
+  for (const ex of [-49, 49]) {
+    ctx.fillStyle = create3DSphereGradient(ctx, ex, 4, 15, profile.skinColor, -0.35, -0.4, 30, -35);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(ex, 4, 10, 14, ex < 0 ? -0.2 : 0.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
 
-  // Head
-  ctx.fillStyle = profile.skinColor;
+  // Spherical 3D skull gradient
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 52, profile.skinColor, -0.38, -0.42, 42, -40);
   ctx.beginPath();
   ctx.arc(0, 0, 50, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
-  // Bald shine highlight
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.42)';
+  // Crisp glossy dome specular highlight
+  const domeShine = ctx.createRadialGradient(-18, -26, 2, -18, -26, 22);
+  domeShine.addColorStop(0, 'rgba(255, 255, 255, 0.72)');
+  domeShine.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  ctx.fillStyle = domeShine;
   ctx.beginPath();
-  ctx.ellipse(-18, -26, 15, 7, -0.45, 0, Math.PI * 2);
+  ctx.ellipse(-18, -26, 18, 9, -0.45, 0, Math.PI * 2);
   ctx.fill();
 
   const fx = pose.headYaw * 12;
-  // Mischievous green eyes + dark lower-lid shadow
-  ctx.fillStyle = 'rgba(100, 116, 139, 0.32)';
+  ctx.fillStyle = 'rgba(100, 116, 139, 0.34)';
   ctx.beginPath();
   ctx.ellipse(-16 + fx, 4, 12, 6, 0, 0, Math.PI * 2);
   ctx.ellipse(16 + fx, 4, 12, 6, 0, 0, Math.PI * 2);
@@ -952,7 +972,7 @@ function drawTuyulRig(
     ctx.save();
     ctx.translate(ex, -4);
     ctx.scale(1, eyeScaleY);
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 10, '#ffffff', -0.3, -0.3, 15, -24);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2.4;
     ctx.beginPath();
@@ -960,7 +980,7 @@ function drawTuyulRig(
     ctx.fill();
     ctx.stroke();
     if (eyeScaleY > 0.25) {
-      ctx.fillStyle = '#2e8b57';
+      ctx.fillStyle = create3DSphereGradient(ctx, pose.lookAtX * 3.5, pose.lookAtY * 3.5, 5.5, '#2e8b57', -0.3, -0.3, 35, -35);
       ctx.beginPath();
       ctx.arc(pose.lookAtX * 3.5, pose.lookAtY * 3.5, 5, 0, Math.PI * 2);
       ctx.fill();
@@ -968,11 +988,14 @@ function drawTuyulRig(
       ctx.beginPath();
       ctx.arc(pose.lookAtX * 3.5, pose.lookAtY * 3.5, 2.4, 0, Math.PI * 2);
       ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(pose.lookAtX * 3.5 - 1.6, pose.lookAtY * 3.5 - 1.6, 1.4, 0, Math.PI * 2);
+      ctx.fill();
     }
     ctx.restore();
   }
 
-  // Mischievous angled eyebrows
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.2;
   ctx.beginPath();
@@ -987,9 +1010,8 @@ function drawTuyulRig(
   drawVisemeMouth(ctx, pose.viseme, pose.mouthOpen, '#3f2e26', 0.92);
   ctx.restore();
 
-  // Pacifier (Dot bayi) for Gus Tuyul Muda
   if (profile.hasPacifier && !pose.isSpeaking) {
-    ctx.fillStyle = '#fbbf24';
+    ctx.fillStyle = create3DSphereGradient(ctx, fx, 24, 11, '#fbbf24', -0.35, -0.4, 48, -32);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
@@ -1016,7 +1038,7 @@ function drawBlorongRig(
   ctx.save();
   ctx.rotate(pose.bodyLean);
 
-  // Secondary Motion: Undulating golden snake tail
+  // Secondary Motion: 3D Metallic Golden Snake Tail
   ctx.save();
   const tailWave1 = Math.sin(globalTime * 3.2) * 26 + pose.scarfAngle * 30;
   const tailWave2 = Math.cos(globalTime * 3.2) * 34 + pose.hairAngle2 * 40;
@@ -1027,16 +1049,19 @@ function drawBlorongRig(
   ctx.moveTo(0, -100);
   ctx.bezierCurveTo(-45 + tailWave1, -55, 65 + tailWave2, -18, 95 + tailWave2, -10);
   ctx.stroke();
-  ctx.strokeStyle = profile.secondaryColor;
+  ctx.strokeStyle = shadeHex(profile.secondaryColor, -28);
   ctx.lineWidth = 40;
+  ctx.stroke();
+  ctx.strokeStyle = profile.secondaryColor;
+  ctx.lineWidth = 28;
   ctx.stroke();
   ctx.strokeStyle = '#fef08a';
   ctx.lineWidth = 10;
   ctx.stroke();
   ctx.restore();
 
-  // Emerald Kebaya torso
-  ctx.fillStyle = profile.primaryColor;
+  // 3D Emerald Kebaya torso
+  ctx.fillStyle = create3DCylinderGradient(ctx, -38, -210, 38, -90, profile.primaryColor, 30, -38);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
@@ -1050,7 +1075,7 @@ function drawBlorongRig(
   ctx.translate(pose.headYaw * 14, -258 + pose.headBobY * 0.5);
   ctx.rotate(pose.headTilt);
 
-  ctx.fillStyle = profile.hairColor;
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -10, 46, profile.hairColor, -0.35, -0.4, 34, -36);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3;
   ctx.beginPath();
@@ -1058,8 +1083,8 @@ function drawBlorongRig(
   ctx.fill();
   ctx.stroke();
 
-  // Golden crown ornament
-  ctx.fillStyle = profile.secondaryColor;
+  // 3D Golden Crown ornament
+  ctx.fillStyle = create3DCylinderGradient(ctx, -26, -68, 26, -42, profile.secondaryColor, 46, -34);
   ctx.beginPath();
   ctx.moveTo(-26, -42);
   ctx.lineTo(-14, -68);
@@ -1070,7 +1095,7 @@ function drawBlorongRig(
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = profile.skinColor;
+  ctx.fillStyle = create3DSphereGradient(ctx, pose.headYaw * 6, 4, 40, profile.skinColor, -0.35, -0.4, 34, -36);
   ctx.beginPath();
   ctx.ellipse(pose.headYaw * 6, 4, 36 * Math.cos(pose.headYaw * 0.35), 40, 0, 0, Math.PI * 2);
   ctx.fill();
@@ -1097,7 +1122,7 @@ function drawHumanIKRig(
   ctx.rotate(pose.bodyLean);
   ctx.scale(pose.breathScale, 1 + (pose.breathScale - 1) * 0.5);
 
-  ctx.fillStyle = profile.primaryColor;
+  ctx.fillStyle = create3DCylinderGradient(ctx, -44, -118, 44, 4, profile.primaryColor, 28, -36);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.5;
   ctx.beginPath();
@@ -1117,7 +1142,7 @@ function drawHumanIKRig(
     ctx.save();
     ctx.translate(0, -104);
     ctx.rotate(pose.scarfAngle * 0.6);
-    ctx.fillStyle = profile.accentColor;
+    ctx.fillStyle = create3DCylinderGradient(ctx, -5, 0, 5, 56, profile.accentColor, 26, -34);
     ctx.fillRect(-5, 0, 10, 56);
     ctx.restore();
   }
@@ -1128,7 +1153,7 @@ function drawHumanIKRig(
   ctx.translate(pose.headYaw * 15, -162 + pose.headBobY * 0.5);
   ctx.rotate(pose.headTilt);
 
-  ctx.fillStyle = profile.skinColor;
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 42, profile.skinColor, -0.35, -0.4, 34, -36);
   ctx.strokeStyle = INK;
   ctx.lineWidth = 3.2;
   ctx.beginPath();
@@ -1136,7 +1161,7 @@ function drawHumanIKRig(
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = profile.hairColor;
+  ctx.fillStyle = create3DSphereGradient(ctx, 0, -12, 40, profile.hairColor, -0.35, -0.4, 30, -35);
   ctx.beginPath();
   ctx.arc(0, -12, 40, Math.PI, 0);
   ctx.fill();
@@ -1178,7 +1203,8 @@ function drawFaceFeatures(
     ctx.save();
     ctx.translate(ex, -6);
     ctx.scale(1, eyeScaleY);
-    ctx.fillStyle = '#ffffff';
+    // 3D Spherical eyeball gradient
+    ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 9.5, '#ffffff', -0.3, -0.3, 10, -24);
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2.2;
     ctx.beginPath();
@@ -1191,14 +1217,14 @@ function drawFaceFeatures(
       ctx.beginPath();
       ctx.arc(pose.lookAtX * 3.5, pose.lookAtY * 3.5, 4.2, 0, Math.PI * 2);
       ctx.fill();
+      // Corneal specular shine
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(pose.lookAtX * 3.5 - 1.5, pose.lookAtY * 3.5 - 1.5, 1.5, 0, Math.PI * 2);
+      ctx.arc(pose.lookAtX * 3.5 - 1.5, pose.lookAtY * 3.5 - 1.5, 1.6, 0, Math.PI * 2);
       ctx.fill();
 
-      // Half-drooped tired upper eyelids for Poci!
       if (droopyLids && pose.actionCue !== 'shock') {
-        ctx.fillStyle = profile.skinColor;
+        ctx.fillStyle = create3DSphereGradient(ctx, 0, -5, 9, profile.skinColor, -0.3, -0.3, 24, -28);
         ctx.beginPath();
         ctx.ellipse(0, -5, 9, 5, 0, Math.PI, Math.PI * 2);
         ctx.fill();
@@ -1244,12 +1270,16 @@ function drawGlowingEyes(
     ctx.translate(ex + fx, fy);
     ctx.scale(1, eyeScaleY);
     if (fierceGlow) {
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.35)';
+      const bloom = ctx.createRadialGradient(0, 0, 2, 0, 0, 18);
+      bloom.addColorStop(0, 'rgba(254, 202, 202, 0.85)');
+      bloom.addColorStop(0.45, 'rgba(239, 68, 68, 0.45)');
+      bloom.addColorStop(1, 'rgba(239, 68, 68, 0)');
+      ctx.fillStyle = bloom;
       ctx.beginPath();
-      ctx.arc(0, 0, 15, 0, Math.PI * 2);
+      ctx.arc(0, 0, 18, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillStyle = glowColor;
+    ctx.fillStyle = create3DSphereGradient(ctx, 0, 0, 9, glowColor, -0.25, -0.3, 45, -30);
     ctx.beginPath();
     ctx.ellipse(0, 0, 9, 7.5, 0, 0, Math.PI * 2);
     ctx.fill();
@@ -1264,7 +1294,7 @@ function drawGlowingEyes(
 }
 
 /**
- * 6-Viseme Mouth Renderer: closed | smile | o | wide | teeth | tongue
+ * 3D Volumetric 6-Viseme Mouth Renderer: closed | smile | o | wide | teeth | tongue
  */
 function drawVisemeMouth(
   ctx: CanvasRenderingContext2D,
@@ -1278,6 +1308,10 @@ function drawVisemeMouth(
   ctx.scale(scale, scale);
   const o = Math.max(0.15, Math.min(1, openness));
 
+  const cavityGrad = ctx.createRadialGradient(0, 2, 2, 0, 2, 18);
+  cavityGrad.addColorStop(0, '#1f0404');
+  cavityGrad.addColorStop(1, '#631010');
+
   switch (viseme) {
     case 'closed': {
       ctx.strokeStyle = lipColor;
@@ -1289,7 +1323,7 @@ function drawVisemeMouth(
       break;
     }
     case 'smile': {
-      ctx.fillStyle = '#450a0a';
+      ctx.fillStyle = cavityGrad;
       ctx.strokeStyle = lipColor;
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -1301,7 +1335,7 @@ function drawVisemeMouth(
       break;
     }
     case 'o': {
-      ctx.fillStyle = '#450a0a';
+      ctx.fillStyle = cavityGrad;
       ctx.strokeStyle = lipColor;
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -1311,7 +1345,7 @@ function drawVisemeMouth(
       break;
     }
     case 'wide': {
-      ctx.fillStyle = '#450a0a';
+      ctx.fillStyle = cavityGrad;
       ctx.strokeStyle = lipColor;
       ctx.lineWidth = 2.8;
       ctx.beginPath();
@@ -1319,7 +1353,7 @@ function drawVisemeMouth(
       ctx.fill();
       ctx.fillStyle = '#f8fafc';
       ctx.fillRect(-10, -4 - 4 * o, 20, 4);
-      ctx.fillStyle = '#fb7185';
+      ctx.fillStyle = create3DSphereGradient(ctx, 0, 7 + 3 * o, 9, '#fb7185', -0.3, -0.4, 30, -35);
       ctx.beginPath();
       ctx.ellipse(0, 7 + 3 * o, 9, 4, 0, 0, Math.PI * 2);
       ctx.fill();
@@ -1327,7 +1361,7 @@ function drawVisemeMouth(
       break;
     }
     case 'teeth': {
-      ctx.fillStyle = '#f8fafc';
+      ctx.fillStyle = create3DCylinderGradient(ctx, -14, -4, 14, 10, '#f8fafc', 10, -20);
       ctx.strokeStyle = lipColor;
       ctx.lineWidth = 2.6;
       ctx.beginPath();
@@ -1337,13 +1371,13 @@ function drawVisemeMouth(
       break;
     }
     case 'tongue': {
-      ctx.fillStyle = '#450a0a';
+      ctx.fillStyle = cavityGrad;
       ctx.strokeStyle = lipColor;
       ctx.lineWidth = 2.6;
       ctx.beginPath();
       ctx.ellipse(0, 2, 13, 8 + 5 * o, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = '#f43f5e';
+      ctx.fillStyle = create3DSphereGradient(ctx, 0, 3, 8, '#f43f5e', -0.3, -0.4, 28, -35);
       ctx.beginPath();
       ctx.ellipse(0, 3, 8, 5, 0, 0, Math.PI * 2);
       ctx.fill();
